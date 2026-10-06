@@ -1003,13 +1003,47 @@ ${JSON.stringify(context, null, 2)}`;
       role: m.role === "assistant" || m.role === "model" ? "model" : "user",
       parts: [{ text: m.text || m.content || "" }]
     }));
-    const response = await ai.models.generateContent({
-      model: selectedModel,
-      contents,
-      config: {
-        systemInstruction
+    const candidateModels = [selectedModel];
+    if (selectedModel === "gemini-3.1-pro-preview") {
+      candidateModels.push("gemini-3.5-flash", "gemini-3.1-flash-lite");
+    } else if (selectedModel === "gemini-3.5-flash") {
+      candidateModels.push("gemini-3.1-flash-lite");
+    } else {
+      candidateModels.push("gemini-3.5-flash");
+    }
+    let response = null;
+    let actualModelUsed = selectedModel;
+    let fallbackNotice = null;
+    let lastError = null;
+    for (const modelCandidate of candidateModels) {
+      try {
+        response = await ai.models.generateContent({
+          model: modelCandidate,
+          contents,
+          config: {
+            systemInstruction
+          }
+        });
+        actualModelUsed = modelCandidate;
+        if (modelCandidate !== selectedModel) {
+          fallbackNotice = `(Auto-switched from ${selectedModel} to ${modelCandidate} due to free-tier quota limits)`;
+        }
+        break;
+      } catch (err) {
+        lastError = err;
+        const errMsg = err?.message || "";
+        const isQuotaOrRateLimit = err?.status === 429 || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("Quota exceeded") || errMsg.includes("quota");
+        if (isQuotaOrRateLimit) {
+          console.warn(`[ScrobbleAI] Quota limit on ${modelCandidate}, trying next candidate...`);
+          continue;
+        } else {
+          throw err;
+        }
       }
-    });
+    }
+    if (!response) {
+      throw lastError || new Error("All candidate models exhausted");
+    }
     const replyText = response.text || "";
     let suggestedTracks = [];
     const tracksBlockMatch = replyText.match(/```tracks\s*([\s\S]*?)\s*```/);
@@ -1019,19 +1053,25 @@ ${JSON.stringify(context, null, 2)}`;
       } catch {
       }
     }
-    const cleanText = replyText.replace(/```tracks\s*[\s\S]*?\s*```/, "").trim();
+    let cleanText = replyText.replace(/```tracks\s*[\s\S]*?\s*```/, "").trim();
+    if (fallbackNotice) {
+      cleanText += `
+
+*${fallbackNotice}*`;
+    }
     return res.json({
       ok: true,
       text: cleanText,
       rawText: replyText,
       suggestedTracks,
-      modelUsed: selectedModel
+      modelUsed: actualModelUsed,
+      fallbackNotice
     });
   } catch (err) {
     console.error("Gemini Chat error:", err);
     return res.status(500).json({
       ok: false,
-      error: err.message || "Failed to generate response from Gemini"
+      error: err.message || "Gemini API quota exceeded or service unavailable. Please try switching to Gemini Flash or Lite."
     });
   }
 });

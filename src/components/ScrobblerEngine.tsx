@@ -13,7 +13,6 @@ import {
   Users,
   Disc,
   ListMusic,
-  Bot,
 } from 'lucide-react';
 import { JobState, LastFmCredentials, QueueTrack } from '../types';
 
@@ -21,8 +20,8 @@ interface ScrobblerEngineProps {
   job: JobState;
   credentials: LastFmCredentials;
   isConnected: boolean;
-  activeNavTab: 'stream' | 'search' | 'ai' | 'harvester' | 'artist' | 'queue' | 'instant';
-  onChangeNavTab: (tab: 'stream' | 'search' | 'ai' | 'harvester' | 'artist' | 'queue' | 'instant') => void;
+  activeNavTab: 'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant';
+  onChangeNavTab: (tab: 'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant') => void;
   queueCount: number;
   onStartJob: (params: {
     artist: string;
@@ -215,18 +214,6 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
           >
             <Search className="w-3.5 h-3.5" />
             <span>Search & Scrobble</span>
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('ai')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'ai'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Bot className="w-3.5 h-3.5" />
-            <span>ScrobbleAI</span>
           </button>
 
           <button

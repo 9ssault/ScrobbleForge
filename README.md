@@ -206,16 +206,7 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
 
 ## 🎯 How to Use Every Feature
 
-### 1. ScrobbleAI (Gemini Music Curator & Copilot)
-- Navigate to the **ScrobbleAI** tab.
-- Multi-turn conversational interface powered by Google Gemini models:
-  - **`gemini-3.5-flash`** (General Tasks): Balanced musical recommendations and playlist generation.
-  - **`gemini-3.1-flash-lite`** (Fast Tasks): Rapid quickfire track ideas and instant recommendations.
-  - **`gemini-3.1-pro-preview`** (Complex Tasks): In-depth music theory, complex discography analysis, and deep catalog sequencing.
-- **1-Click Queue & Scrobble**: Any tracks recommended by ScrobbleAI include instant **"Queue All"** and **"⚡ Scrobble All"** buttons!
-- **Context-Aware**: Understands your active track, current queue, and recent listening history to give tailored suggestions.
-
-### 2. Universal Search & Scrobbler (Users, Artists, Albums & Tracks)
+### 1. Universal Search & Scrobbler (Users, Artists, Albums & Tracks)
 - Navigate to the **Search & Scrobble** tab.
 - Switch between:
   - **User Profile**: Search any Last.fm username to view profile stats and scrobble their recent plays with one click.
@@ -243,14 +234,14 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
   - **"Stream Paced"** to play through with intervals and jitter.
   - **"Add to Queue"** to combine with other playlists.
 
-### 2. Artist Discography & Full Album Scrobbler
+### 4. Artist Discography & Full Album Scrobbler
 - Navigate to the **Artist & Albums** tab.
 - Enter any artist name (e.g. `rvaia`, `SZA`, `The Weeknd`, `Kanye West`, `Daft Punk`).
 - **Top Tracks view**: Scrobble all popular tracks by this artist with 1 click.
 - **Albums view**: Browse albums with high-res artwork. Click any album to view the complete official tracklist in chronological sequence with song durations.
 - Click **"Scrobble Full Album"** to scrobble the album in order!
 
-### 3. Active Queue & Playlist Workspace
+### 5. Active Queue & Playlist Workspace
 - Click the **Queue** tab.
 - View all songs gathered from profiles, albums, or searches.
 - Re-order, shuffle, or remove individual tracks.
@@ -258,14 +249,14 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
   - **"Stream Queue Paced"**: Plays through track-by-track, updating your profile's "Now Playing" before each scrobble.
   - **"Batch Scrobble All Tracks"**: Submits all songs in batches of 50, distributed backwards in time across 6h, 24h, 2 days, or 7 days so charts look authentic.
 
-### 4. Continuous Single Loop (`scrobble.py` Engine)
+### 6. Continuous Single Loop (`scrobble.py` Engine)
 - Click the **Single Loop** tab.
 - Set Artist, Track Title, Album, Limit (e.g. 1800), and Interval (e.g. 2s).
 - **Random Jitter (±0.5s)**: Simulates human playback timing to avoid uniform bot flags.
 - **Code 26 Auto-Recovery**: If Last.fm's rate limit triggers, the engine automatically pauses for 60 seconds with a visual countdown timer before resuming seamlessly.
 - Full Start, Pause, Resume, and Stop/Reset controls.
 
-### 5. Instant Actions
+### 7. Instant Actions
 - **1-Click Test Scrobble**: Immediately sends 1 scrobble to verify API credentials.
 - **Broadcast "Now Playing"**: Sets your public profile status to "Scrobbling now" without incrementing play count.
 

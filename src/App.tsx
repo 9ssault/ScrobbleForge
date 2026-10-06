@@ -11,7 +11,6 @@ import { UniversalSearchExplorer } from './components/UniversalSearchExplorer';
 import { ProfileHarvester } from './components/ProfileHarvester';
 import { ArtistCatalogExplorer } from './components/ArtistCatalogExplorer';
 import { ActiveQueueManager } from './components/ActiveQueueManager';
-import { GeminiChatbot } from './components/GeminiChatbot';
 import { CatchUpBanner } from './components/CatchUpBanner';
 import { LiveConsole } from './components/LiveConsole';
 import { RecentScrobblesFeed } from './components/RecentScrobblesFeed';
@@ -39,7 +38,7 @@ const DEFAULT_CREDS: LastFmCredentials = {
 export default function App() {
   // Navigation / workspace tab
   const [activeNavTab, setActiveNavTab] = useState<
-    'stream' | 'search' | 'ai' | 'harvester' | 'artist' | 'queue' | 'instant'
+    'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant'
   >('stream');
 
   // Credentials & Auth
@@ -677,20 +676,6 @@ export default function App() {
                 onAddTracksToQueue={handleAddTracksToQueue}
                 onInstantBatchScrobble={handleBatchScrobbleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
-              />
-            )}
-
-            {activeNavTab === 'ai' && (
-              <GeminiChatbot
-                onAddTracksToQueue={handleAddTracksToQueue}
-                onInstantBatchScrobble={handleBatchScrobbleQueue}
-                activeTrack={{
-                  artist: job.artist,
-                  track: job.track,
-                  album: job.album,
-                }}
-                recentTracks={recentTracks}
-                queueCount={queue.length}
               />
             )}
 

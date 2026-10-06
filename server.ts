@@ -3,7 +3,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -1256,84 +1255,6 @@ app.post('/api/job/clear-logs', (_req: Request, res: Response) => {
   activeJob.logs = [];
   emitSSE('status', getJobStatusPayload());
   return res.json({ ok: true });
-});
-
-// Gemini AI Chatbot Endpoint
-app.post('/api/gemini/chat', async (req: Request, res: Response) => {
-  try {
-    const { messages, model, role, context } = req.body;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(400).json({
-        ok: false,
-        error: 'GEMINI_API_KEY is not configured in the server environment.',
-      });
-    }
-
-    const ai = new GoogleGenAI({});
-    const selectedModel = model || 'gemini-3.5-flash';
-
-    let systemInstruction = `You are ScrobbleAI, an expert musicologist, playlist curator, and Last.fm scrobbler assistant embedded in ScrobbleForge.
-Your mission is to help users discover music, explore deep discographies, build playlist queues to scrobble, and analyze listening habits.
-When recommending songs, format them clearly as "Artist - Title" (and optional Album).
-Whenever you suggest specific tracks, also include a structured JSON block at the very end of your response formatted exactly as:
-\`\`\`tracks
-[
-  {"artist": "Artist Name", "name": "Song Title", "album": "Album Name"}
-]
-\`\`\`
-This enables the ScrobbleForge UI to render instant 1-click "Add to Queue" or "Scrobble Now" buttons for your recommended songs!
-Keep your tone passionate, insightful, and knowledgeable about music genres, history, and Last.fm culture.`;
-
-    if (role === 'analyst') {
-      systemInstruction += `\nRole: Deep Music Analyst. Focus on detailed discography breakdowns, sonic aesthetics, genre evolution, and track sequencing.`;
-    } else if (role === 'fast_recommender') {
-      systemInstruction += `\nRole: Fast Recommender. Keep answers punchy, rapid, and direct with instant song ideas.`;
-    }
-
-    if (context) {
-      systemInstruction += `\nCurrent User Context:\n${JSON.stringify(context, null, 2)}`;
-    }
-
-    const contents = (messages || []).map((m: any) => ({
-      role: m.role === 'assistant' || m.role === 'model' ? 'model' : 'user',
-      parts: [{ text: m.text || m.content || '' }],
-    }));
-
-    const response = await ai.models.generateContent({
-      model: selectedModel,
-      contents,
-      config: {
-        systemInstruction,
-      },
-    });
-
-    const replyText = response.text || '';
-
-    let suggestedTracks: Array<{ artist: string; name: string; album?: string }> = [];
-    const tracksBlockMatch = replyText.match(/```tracks\s*([\s\S]*?)\s*```/);
-    if (tracksBlockMatch && tracksBlockMatch[1]) {
-      try {
-        suggestedTracks = JSON.parse(tracksBlockMatch[1]);
-      } catch {}
-    }
-
-    const cleanText = replyText.replace(/```tracks\s*[\s\S]*?\s*```/, '').trim();
-
-    return res.json({
-      ok: true,
-      text: cleanText,
-      rawText: replyText,
-      suggestedTracks,
-      modelUsed: selectedModel,
-    });
-  } catch (err: any) {
-    console.error('Gemini Chat error:', err);
-    return res.status(500).json({
-      ok: false,
-      error: err.message || 'Failed to generate response from Gemini',
-    });
-  }
 });
 
 // Start Express and integrate Vite in development or static serve in production
