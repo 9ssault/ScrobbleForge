@@ -1,0 +1,7 @@
+{
+  "name": "ScrobbleForge - Last.fm Automation & Scrobbler Studio",
+  "description": "High-performance Last.fm batch scrobbler, playback simulator, and track manager with real-time rate limit pacing, queue management, and live activity feed.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
