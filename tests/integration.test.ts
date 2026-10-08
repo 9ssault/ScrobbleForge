@@ -1,0 +1,215 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
+
+const credentials = { apiKey: 'test-key', apiSecret: 'secret-marker', sessionKey: 'session-marker', username: 'test-user', password: 'password-marker' };
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+async function until<T>(callback: () => Promise<T>, predicate: (value: T) => boolean, timeout = 5000): Promise<T> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) { const value = await callback(); if (predicate(value)) return value; await delay(40); }
+  throw new Error('Condition did not become true within the timeout');
+}
+async function harness() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'scrobbleforge-test-'));
+  const listener = net.createServer();
+  await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const address = listener.address() as net.AddressInfo;
+  await new Promise<void>(resolve => listener.close(() => resolve()));
+  const origin = `http://127.0.0.1:${address.port}`;
+  let process: ChildProcess | undefined;
+  let output = '';
+  async function start() {
+    process = spawn(globalThis.process.execPath, ['--import', 'tsx', '--import', './tests/lastfm-fixture.mjs', globalThis.process.env.TEST_BUILT_SERVER === 'true' ? 'server.js' : 'server.ts'], {
+      cwd: globalThis.process.cwd(), env: { ...globalThis.process.env, PORT: String(address.port), NODE_ENV: 'production', ACTIVITY_DB_PATH: path.join(dir, 'activity.sqlite'), LASTFM_API_KEY: 'test-key', LASTFM_API_SECRET: 'secret-marker' }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    process.stdout?.on('data', chunk => { output += chunk; }); process.stderr?.on('data', chunk => { output += chunk; });
+    for (let i = 0; i < 100; i++) {
+      if (process.exitCode !== null) throw new Error(`Server exited: ${output}`);
+      try { const response = await fetch(`${origin}/api/job/status`); if (response.ok) return; } catch { /* Wait for this owned child. */ }
+      await delay(30);
+    }
+    throw new Error(`Server did not become ready: ${output}`);
+  }
+  async function stop() {
+    if (process && process.exitCode === null) { const owned = process; await new Promise<void>(resolve => { owned.once('exit', () => resolve()); owned.kill('SIGTERM'); }); }
+    process = undefined;
+  }
+  const get = async (route: string) => { const response = await fetch(origin + route); assert.equal(response.status, 200); return response.json(); };
+  const post = async (route: string, body: unknown = {}, headers: Record<string, string> = {}) => {
+    const response = await fetch(origin + route, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    return { status: response.status, headers: response.headers, data: await response.json() };
+  };
+  await start();
+  return { origin, get, post, restart: async () => { await stop(); await start(); }, close: async () => { await stop(); await rm(dir, { recursive: true, force: true }); } };
+}
+
+test('persistent journal records more than 500 events, pages/searches/exports and survives view clearing, new jobs and restart', async () => {
+  const app = await harness();
+  try {
+    for (let i = 0; i < 260; i++) {
+      const result = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: `accepted-${i}` });
+      assert.equal(result.status, 200);
+    }
+    const summary = (await app.get('/api/activity/summary')).summary;
+    assert.equal(summary.accepted, 260); assert.equal(summary.requests, 260); assert.ok(summary.totalEvents > 500);
+    const page = await app.get('/api/activity?limit=100'); assert.equal(page.logs.length, 100); assert.equal(page.hasMore, true);
+    const previous = await app.get(`/api/activity?before=${page.nextBefore}&limit=100`); assert.ok(previous.logs.at(-1).seq < page.logs[0].seq);
+    const search = await app.get('/api/activity?search=accepted-0'); assert.ok(search.logs.some((log: any) => log.track === 'accepted-0'));
+    await app.post('/api/job/clear-logs');
+    assert.equal((await app.get('/api/activity/summary')).summary.accepted, 260);
+    await app.post('/api/job/start', { artist: 'Dry artist', track: 'Dry track', limit: 1, interval: 0.5, jitter: false, isDryRun: true });
+    const finished = await until(() => app.get('/api/job/status'), data => data.job.status === 'completed');
+    assert.equal(finished.job.scrobblesCompleted, 0); assert.equal(finished.job.simulatedCount, 1); assert.equal(finished.job.lastScrobbleTime, null);
+    await app.restart();
+    assert.equal((await app.get('/api/activity/summary')).summary.accepted, 260);
+    const response = await fetch(app.origin + '/api/activity/export'); assert.match(response.headers.get('content-type')!, /application\/x-ndjson/);
+    const exported = await response.text(); const records = exported.trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(records.length > 500); assert.equal(new Set(records.map(record => record.id)).size, records.length);
+    for (const secret of ['password-marker', 'secret-marker', 'session-marker', 'test-key']) assert.ok(!exported.includes(secret), `${secret} leaked`);
+  } finally { await app.close(); }
+});
+
+test('HTTP 429 (including non-JSON) and string code 26 are recorded centrally, with cooldowns and Retry-After', async () => {
+  const app = await harness();
+  try {
+    const response = await fetch(app.origin + '/api/lastfm/search?track=http-limit&apiKey=test-key');
+    assert.equal(response.status, 429);
+    assert.equal((await response.json()).errorCode, 26);
+    let summary = (await app.get('/api/activity/summary')).summary;
+    assert.equal(summary.rateLimitHits, 1);
+    const deferred = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'accepted' });
+    assert.equal(deferred.status, 429); assert.equal(deferred.headers.get('retry-after'), '1');
+    assert.equal((await app.get('/api/activity/summary')).summary.rateLimitHits, 1);
+    await delay(1100);
+    const codeLimit = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'code-limit' });
+    assert.equal(codeLimit.status, 429); assert.equal(codeLimit.data.errorCode, 26);
+    summary = (await app.get('/api/activity/summary')).summary; assert.equal(summary.rateLimitHits, 2);
+    const events = await app.get('/api/activity?level=rate_limit');
+    assert.equal(events.logs.length, 2); assert.equal(events.logs[0].httpStatus, 429); assert.equal(events.logs[1].httpStatus, 200);
+    assert.ok(events.logs.every((log: any) => log.requestId && log.retryAfterSeconds));
+    await app.restart();
+    assert.equal((await app.get('/api/activity/summary')).summary.rateLimitHits, 2);
+  } finally { await app.close(); }
+});
+
+test('pause/resume preserves cooldown; automatic recovery retries an unaccepted track only', async () => {
+  const app = await harness();
+  try {
+    await app.post('/api/job/start', { artist: 'Artist', track: 'cooldown-once', credentials, limit: 1, interval: 0.5, jitter: false });
+    await until(() => app.get('/api/job/status'), data => data.job.status === 'rate_limited');
+    assert.equal((await app.post('/api/job/pause')).data.job.status, 'paused');
+    assert.equal((await app.post('/api/job/resume')).data.job.status, 'rate_limited');
+    const complete = await until(() => app.get('/api/job/status'), data => data.job.status === 'completed');
+    assert.equal(complete.job.scrobblesCompleted, 1); assert.equal(complete.job.failedCount, 0);
+    const summary = (await app.get('/api/activity/summary')).summary; assert.equal(summary.accepted, 1); assert.equal(summary.requests, 2); assert.equal(summary.rateLimitHits, 1);
+  } finally { await app.close(); }
+});
+
+test('ignored tracks, Now Playing failures, daily limit and uncertain outcomes never count as success', async () => {
+  const app = await harness();
+  try {
+    const ignored = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'ignored' });
+    assert.equal(ignored.status, 422); assert.equal(ignored.data.accepted, 0); assert.equal(ignored.data.ignored, 1);
+    assert.equal((await app.post('/api/lastfm/now-playing', { ...credentials, artist: 'Artist', track: 'now-error' })).data.ok, false);
+    const daily = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'daily-limit' }); assert.equal(daily.data.errorCode, 29);
+    const malformed = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'malformed' }); assert.equal(malformed.data.uncertain, true);
+    const network = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'network-fail' }); assert.equal(network.data.uncertain, true);
+    const summary = (await app.get('/api/activity/summary')).summary; assert.equal(summary.accepted, 0); assert.equal(summary.ignored, 1); assert.equal(summary.uncertainRequests, 2); assert.equal(summary.rateLimitHits, 1);
+    const raw = await (await fetch(app.origin + '/api/activity/export')).text(); assert.ok(!raw.includes('secret-marker')); assert.ok(!raw.includes('session-marker'));
+  } finally { await app.close(); }
+});
+
+test('batch partial outcomes and historical timestamps stay correct, detailed and within bounds', async () => {
+  const app = await harness();
+  try {
+    const endTime = Math.floor(Date.now() / 1000) - 5, startTime = endTime - 60;
+    const result = await app.post('/api/job/batch-scrobble-all', { ...credentials, startTime, endTime, tracks: [{ name: 'accepted', artist: 'Artist' }, { name: 'ignored', artist: 'Artist' }, { name: 'accepted-2', artist: 'Artist' }] });
+    assert.equal(result.data.ok, false); assert.equal(result.data.completed, 2); assert.equal(result.data.ignored, 1);
+    const summary = (await app.get('/api/activity/summary')).summary; assert.equal(summary.accepted, 2); assert.equal(summary.ignored, 1);
+    const logs = (await app.get('/api/activity')).logs.filter((log: any) => log.scrobbleTimestamp);
+    assert.equal(logs.length, 3); assert.ok(logs.every((log: any) => log.scrobbleTimestamp >= startTime && log.scrobbleTimestamp <= endTime));
+    assert.equal(new Set(logs.map((log: any) => log.jobId)).size, 1);
+    assert.equal((await app.post('/api/job/batch-scrobble-all', { ...credentials, startTime: endTime - 20 * 86400, endTime, tracks: [{ name: 'accepted', artist: 'Artist' }] })).status, 400);
+  } finally { await app.close(); }
+});
+
+test('stop during an in-flight submission blocks replacement and prevents another submission', async () => {
+  const app = await harness();
+  try {
+    await app.post('/api/job/start', { artist: 'Artist', track: 'slow', credentials, limit: 3, interval: 0.5, jitter: false });
+    await app.post('/api/job/stop');
+    const replacement = await app.post('/api/job/start', { artist: 'Artist', track: 'accepted', credentials, limit: 1 }); assert.equal(replacement.data.ok, false);
+    await delay(1000);
+    const status = await app.get('/api/job/status'); assert.equal(status.job.status, 'idle'); assert.equal(status.job.scrobblesCompleted, 1);
+    assert.equal((await app.get('/api/activity/summary')).summary.requests, 1);
+  } finally { await app.close(); }
+});
+
+test('restart restores progress paused, not auto-submitting; disconnect clears server credentials', async () => {
+  const app = await harness();
+  try {
+    const auth = await app.post('/api/lastfm/auth', { username: 'test-user', password: 'password-marker' }); assert.equal(auth.data.ok, true);
+    await app.post('/api/job/start', { artist: 'Artist', track: 'accepted', limit: 4, interval: 10, jitter: false });
+    await until(() => app.get('/api/job/status'), data => data.job.scrobblesCompleted === 1);
+    await app.restart();
+    const restored = await app.get('/api/job/status'); assert.equal(restored.job.status, 'paused'); assert.equal(restored.job.scrobblesCompleted, 1);
+    await app.post('/api/lastfm/disconnect');
+    const attempt = await app.post('/api/lastfm/single-scrobble', { artist: 'Artist', track: 'accepted' }); assert.equal(attempt.status, 400);
+    assert.equal((await app.get('/api/job/status')).job.status, 'idle');
+  } finally { await app.close(); }
+});
+
+test('duplicate batches are rejected; cancellation retains accepted chunks', async () => {
+  const app = await harness();
+  try {
+    const tracks = Array.from({ length: 51 }, () => ({ name: 'accepted', artist: 'Artist' }));
+    const first = app.post('/api/job/batch-scrobble-all', { ...credentials, tracks, spanHours: 1 });
+    await until(() => app.get('/api/job/batch-status'), data => data.batch.accepted === 50);
+    assert.equal((await app.post('/api/job/batch-scrobble-all', { ...credentials, tracks })).status, 409);
+    await app.post('/api/job/cancel-batch');
+    const result = await first; assert.equal(result.data.cancelled, true); assert.equal(result.data.completed, 50);
+    assert.equal((await app.get('/api/activity/summary')).summary.accepted, 50);
+  } finally { await app.close(); }
+});
+
+test('profile page rate limits do not silently return a successful empty or partial import', async () => {
+  const app = await harness();
+  try {
+    const response = await fetch(app.origin + '/api/lastfm/fetch-profile-tracks?apiKey=test-key&username=test-user&limit=10&pages=2');
+    assert.equal(response.status, 429); assert.equal((await response.json()).ok, false);
+    assert.equal((await app.get('/api/activity/summary')).summary.rateLimitHits, 1);
+  } finally { await app.close(); }
+});
+
+test('foreign-Origin mutations, invalid queues and bad timestamps are rejected; SSE delivers real status/log events', async () => {
+  const app = await harness();
+  try {
+    assert.equal((await app.post('/api/job/stop', {}, { Origin: 'https://foreign.example' })).status, 403);
+    assert.equal((await app.post('/api/job/start', { artist: 'Artist', track: 'accepted', isDryRun: true, interval: -1 })).status, 400);
+    assert.equal((await app.post('/api/job/start', { isDryRun: true, queueMode: 'queue_once', queue: [] })).status, 400);
+    assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'accepted', timestamp: Math.floor(Date.now()/1000) + 100 })).status, 400);
+    const controller = new AbortController();
+    const response = await fetch(app.origin + '/api/job/events', { signal: controller.signal }); assert.match(response.headers.get('content-type')!, /text\/event-stream/);
+    const reader = response.body!.getReader();
+    const initial = await reader.read(); assert.match(new TextDecoder().decode(initial.value), /event: status/);
+    await app.post('/api/job/start', { artist: 'Artist', track: 'dry', isDryRun: true, limit: 1, interval: 0.5 });
+    const event = await reader.read(); assert.match(new TextDecoder().decode(event.value), /event: log/);
+    controller.abort();
+  } finally { await app.close(); }
+});
+
+test('daily ignored limit records a rate-limit event and stops the stream rather than hammering Last.fm', async () => {
+  const app = await harness();
+  try {
+    await app.post('/api/job/start', { artist: 'Artist', track: 'daily-ignored', credentials, limit: 4, interval: 0.5, jitter: false });
+    const result = await until(() => app.get('/api/job/status'), data => data.job.status === 'error');
+    assert.equal(result.job.scrobblesCompleted, 0); assert.equal(result.job.ignoredCount, 1);
+    await delay(700);
+    const summary = (await app.get('/api/activity/summary')).summary;
+    assert.equal(summary.rateLimitHits, 1); assert.equal(summary.requests, 1); assert.equal(summary.ignored, 1);
+  } finally { await app.close(); }
+});

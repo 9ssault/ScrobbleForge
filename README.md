@@ -31,7 +31,7 @@ You can run ScrobbleForge directly on **any smartphone, tablet, or computer** th
 If you wish to host or run ScrobbleForge locally on your own machine, follow the instructions for your platform below.
 
 ### 📋 Prerequisites (For Local Hosting)
-- **Node.js** version `18.0.0` or higher ([Download Node.js](https://nodejs.org/))
+- **Node.js** version `22.13.0` or higher ([Download Node.js](https://nodejs.org/))
 - **Git** (optional, for cloning)
 
 ---
@@ -49,7 +49,7 @@ If you wish to host or run ScrobbleForge locally on your own machine, follow the
    ```
 3. **Install Dependencies**:
    ```bash
-   npm install
+   bun install --frozen-lockfile
    ```
 4. **Start the Application**:
    ```bash
@@ -75,7 +75,7 @@ If you wish to host or run ScrobbleForge locally on your own machine, follow the
    ```
 5. Install packages:
    ```powershell
-   npm install
+   bun install --frozen-lockfile
    ```
 6. Launch the server:
    ```powershell
@@ -91,7 +91,7 @@ If you wish to host or run ScrobbleForge locally on your own machine, follow the
    ```
 2. Navigate to your project folder and run:
    ```bash
-   npm install
+   bun install --frozen-lockfile
    npm run dev
    ```
 3. Open [http://localhost:3000](http://localhost:3000) in your Windows browser.
@@ -102,15 +102,15 @@ If you wish to host or run ScrobbleForge locally on your own machine, follow the
 
 #### Ubuntu / Debian:
 ```bash
-# 1. Install Node.js 20.x LTS repository
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# 1. Install Node.js 24.x LTS repository
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt install -y nodejs git
 
 # 2. Navigate to project directory
 cd scrobbleforge
 
 # 3. Install dependencies
-npm install
+bun install --frozen-lockfile
 
 # 4. Start the dev server
 npm run dev
@@ -120,7 +120,7 @@ npm run dev
 ```bash
 sudo pacman -S nodejs npm git
 cd scrobbleforge
-npm install
+bun install --frozen-lockfile
 npm run dev
 ```
 
@@ -145,7 +145,7 @@ You can run the entire ScrobbleForge server natively on your Android phone witho
    ```
 5. Install dependencies:
    ```bash
-   npm install
+   bun install --frozen-lockfile
    ```
 6. Start the server:
    ```bash
@@ -169,7 +169,7 @@ To keep ScrobbleForge running 24/7 on a remote Linux server (DigitalOcean, Hetzn
    ```
 2. **Install PM2 process manager**:
    ```bash
-   sudo npm install -g pm2
+   sudo bun install --frozen-lockfile -g pm2
    ```
 3. **Start with PM2**:
    ```bash
@@ -200,7 +200,7 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
    - Enter your **API Key**, **API Secret**, **Username**, and **Password**.
    - Click **Authenticate & Connect**.
 
-> **Security Note**: Your password and API secret are never transmitted to third parties or logged. Passwords are exchanged with Last.fm directly for an authorized session token (`sk`), keeping your account secure.
+> **Security Note**: The browser sends credentials to your ScrobbleForge server, which forwards them to Last.fm over HTTPS. Passwords, secrets, session keys, and raw API payloads are not written to the activity journal or browser storage. Reconnect after reload. The server caches credentials in memory until disconnect/restart. This is a single-operator app: do not expose it publicly without an authenticated access proxy.
 
 ---
 
@@ -214,12 +214,12 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
   - **Album**: Search any album across Last.fm to inspect the full tracklist and scrobble in original sequence.
   - **Track**: Search specific song titles and scrobble them immediately or queue them.
 
-### 2. Live Session Idle Detection (> 1h Gap) & 1-Click Catch-up
-- Automatically monitors playback activity during and after Live streaming sessions.
-- **> 1 Hour Idle Gap Detection**: When your session has been idle for more than an hour, a prominent amber notification detects the gap (e.g. `Idle for 1h 24m`).
-- **Missing Track Calculation**: Estimates how many songs would have played during that silent period based on song length (~3.5 minutes).
-- **1-Click Catch-up**: Click **"⚡ Catch-up Missing Tracks"** to automatically distribute the missing songs backwards in time across the gap from when you stopped until now, with an option to resume live playback immediately!
-- Includes a **"Simulate 1h Idle"** button for instant demonstration and testing.
+### 2. Idle Detection and Estimated Backfill
+- An idle gap is **not evidence of missing playback**. The app cannot recover listening that it never observed.
+- Backfill creates **estimated plays** using recent history, the editable queue, or the configured track. Preview the tracks/time range and confirm before submitting.
+- Existing history may already include those plays. Check Last.fm first to avoid duplicates.
+- Only confirmed accepted submissions update playback activity; dry runs do not.
+- Developer tools can simulate an idle gap without recording playback.
 
 ### 3. Profile Harvester (Clone & Scrobble Any User's Music)
 - Navigate to the **Profile Harvester** tab.
@@ -246,14 +246,14 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
 - View all songs gathered from profiles, albums, or searches.
 - Re-order, shuffle, or remove individual tracks.
 - Options:
-  - **"Stream Queue Paced"**: Plays through track-by-track, updating your profile's "Now Playing" before each scrobble.
-  - **"Batch Scrobble All Tracks"**: Submits all songs in batches of 50, distributed backwards in time across 6h, 24h, 2 days, or 7 days so charts look authentic.
+  - **"Stream Queue Paced"**: Submits tracks one at a time at the configured interval. It does not play audio or automatically broadcast Now Playing.
+  - **"Batch Scrobble All Tracks"**: Submits all songs in batches of 50, distributed backwards in time across 6h, 24h, 2 days, or 7 days inside your selected historical time range. It does not verify that those plays occurred.
 
 ### 6. Continuous Single Loop (`scrobble.py` Engine)
 - Click the **Single Loop** tab.
 - Set Artist, Track Title, Album, Limit (e.g. 1800), and Interval (e.g. 2s).
-- **Random Jitter (±0.5s)**: Simulates human playback timing to avoid uniform bot flags.
-- **Code 26 Auto-Recovery**: If Last.fm's rate limit triggers, the engine automatically pauses for 60 seconds with a visual countdown timer before resuming seamlessly.
+- **Random Jitter (±0.5s)**: Varies spacing slightly; it does not bypass Last.fm limits or guarantee acceptance.
+- **Code 26 Auto-Recovery**: If Last.fm's rate limit triggers, the engine automatically pauses for the `Retry-After` duration (60 seconds when absent) with a visual countdown timer before resuming seamlessly.
 - Full Start, Pause, Resume, and Stop/Reset controls.
 
 ### 7. Instant Actions
@@ -269,8 +269,43 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
 | `npm run dev` | Runs the full-stack server (Vite + Express) on port 3000 |
 | `npm run build` | Builds optimized frontend bundle and standalone backend `server.js` |
 | `npm start` | Runs the production standalone Node.js server |
+| `npm test` | Runs isolated HTTP regression tests with mocked Last.fm; makes no real scrobbles |
 | `npm run lint` | Runs TypeScript type checking with zero errors |
 | `npm run clean` | Removes compiled `dist/` and build artifacts |
+
+---
+
+## Activity journal and reliable outcomes
+
+- SQLite persists events in `data/activity.sqlite` by default. Mount a persistent volume here on a VPS/container; back it up using SQLite-aware tooling. Browser refreshes, new jobs, and server restarts do not clear the journal.
+- Set `ACTIVITY_DB_PATH` to change the location and `ACTIVITY_RETENTION_DAYS` to change retention (default 90 days). The directory must be writable. Initialization/write failures are errors, not silent in-memory fallback. Retention cleanup runs on writes, at most hourly; exports include all currently retained records.
+- The journal records request attempts, HTTP/API outcomes, latency, per-track accepted/ignored details, historical timestamps, rate limits, cooldown deferrals, job controls, and restart recovery. It intentionally does **not** record raw request/response payloads, secrets, sessions, or URLs containing credentials. It is not a capture of every UI click or external listening activity.
+- Dashboard totals cover the retained journal. Accepted, ignored, simulated, failed, rate-limited, and uncertain outcomes are distinct. HTTP 200 is not proof that a scrobble was accepted.
+- `GET /api/activity?limit=100&before=<sequence>&level=rate_limit&search=<text>` reads paginated history. `GET /api/activity/summary` returns retained totals and cooldown state. `GET /api/activity/export` streams **all retained events** as `scrobbleforge-activity.ndjson` (one JSON record per line), regardless of UI filters.
+- Clearing the console only hides its current view; it never deletes the saved journal. Restore saved history or reload to see it again.
+- Daily-limit error 29 and per-track ignored code 5 are recorded as rate-limit events and stop further live/batch submissions. They do not use the short temporary cooldown.
+- Last.fm HTTP 429 and error code 26 share a cooldown across the single-operator workspace. Resume preserves the cooldown. Live workers retry after known rate-limit rejection; uncertain write/network failures stop rather than risk duplicates. Batch and instant actions return explicit errors and partial counts, and require review before resubmission.
+- A stopped job allows an already in-flight request to finish and records its result, but sends no further requests. Batch cancellation stops before the next chunk; already accepted tracks cannot be undone.
+- Restart restores the last streaming job checkpoint **paused**. Credentials are not persisted. Reconnect before resuming; a submission interrupted by restart can be uncertain. Batches have live progress/cancellation but are not durable resumable jobs yet.
+- Queue JSON import/export uses `scrobbleforge-queue.json`: an array of tracks with `name`, `artist`, optional `album` and `duration` (seconds). Imports are limited to 2 MB/5000 tracks. Reordering/shuffling/editing does not change a running job's queue snapshot.
+- The recent-listening chart is explicitly a sample of up to 60 fetched tracks, not a complete 24-hour count. Now Playing is excluded. Polling is consolidated and pauses when the page is hidden or a known cooldown is active.
+
+## Runtime and installation
+
+Use Node **22.13+** (Node 24 LTS recommended for built-in `node:sqlite`) and Bun **1.4.2+** to read the checked-in lockfile. Dependencies are not automatically installed. For a reproducible install, this repository's lockfile contains one unused `@google/genai` root dependency missing from `package.json`; temporarily restore that entry while installing, then restore the original manifest:
+
+```bash
+cp package.json package.json.install-backup
+node --input-type=module -e "import fs from 'node:fs'; const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.dependencies['@google/genai']='^2.4.0'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+bun install --frozen-lockfile
+# Restore this even if installation failed. Do not regenerate the lockfile.
+mv package.json.install-backup package.json
+npm run dev
+```
+
+The unused dependency is not imported or bundled. The lockfile was preserved during this upgrade. `npm start` serves the built production output; `npm run dev` runs Express with Vite middleware on `0.0.0.0:3000`.
+
+**Hosting limitations:** this uses a Node/Express server, SQLite, and timers; it is not a Cloudflare Worker build. It has no application-level multi-user authentication or per-user data isolation. Run locally or behind trusted authenticated access. Same-origin mutation checks do not replace authentication. Last.fm browser-authorization migration, durable resumable batches, true full-day analytics, and PWA offline installation remain future work.
 
 ---
 

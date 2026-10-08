@@ -10,12 +10,18 @@ import {
   Clock,
   Sparkles,
   Radio,
+  ArrowUp,
+  ArrowDown,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { QueueTrack } from '../types';
 
 interface ActiveQueueManagerProps {
   queue: QueueTrack[];
-  currentTrackIndex: number;
+  currentTrackId?: string;
+  onReorder: (id: string, direction: number) => void;
+  onImport: (tracks: QueueTrack[]) => void;
   isStreaming: boolean;
   onClearQueue: () => void;
   onRemoveTrack: (id: string) => void;
@@ -26,7 +32,9 @@ interface ActiveQueueManagerProps {
 
 export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
   queue,
-  currentTrackIndex,
+  currentTrackId,
+  onReorder,
+  onImport,
   isStreaming,
   onClearQueue,
   onRemoveTrack,
@@ -38,6 +46,21 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
   const [batchSpanHours, setBatchSpanHours] = useState(24);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
 
+  const [feedback, setFeedback] = useState('');
+  const exportQueue = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(queue, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'scrobbleforge-queue.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const importQueue = async (file?: File) => {
+    if (!file) return;
+    try {
+      if (file.size > 2000000) throw new Error('Queue file must be smaller than 2MB.');
+      const tracks = JSON.parse(await file.text());
+      if (!Array.isArray(tracks) || tracks.length > 5000 || tracks.some(t => typeof t.name !== 'string' || !t.name.trim() || typeof t.artist !== 'string' || !t.artist.trim())) throw new Error('Choose a valid JSON track array (maximum 5000 tracks).');
+      onImport(tracks.map(t => ({ id: crypto.randomUUID(), name: t.name, artist: t.artist, album: typeof t.album === 'string' ? t.album : '', duration: typeof t.duration === 'number' && t.duration > 0 ? t.duration : 180 })));
+    } catch (e) { setFeedback(e instanceof Error ? e.message : 'Import failed.'); }
+  };
+  const importControl = <label className="secondary-button text-xs inline-flex items-center gap-2 cursor-pointer"><Upload size={14} />Import JSON<input type="file" accept="application/json,.json" className="sr-only" aria-label="Import queue JSON" onChange={e => { void importQueue(e.target.files?.[0]); e.target.value = ''; }} /></label>;
   const totalDurationSeconds = queue.reduce((acc, t) => acc + (t.duration || 180), 0);
   const totalMinutes = Math.floor(totalDurationSeconds / 60);
   const formattedDuration =
@@ -48,24 +71,25 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
   const handleBatchScrobble = async () => {
     if (queue.length === 0) return;
     setIsBatchRunning(true);
-    await onBatchScrobbleQueue(queue, batchSpanHours);
-    setIsBatchRunning(false);
+    try { const ok = await onBatchScrobbleQueue(queue, batchSpanHours); setFeedback(ok ? 'Batch confirmed. See activity for exact results.' : 'Batch was not fully accepted. Review the recorded results.'); } finally { setIsBatchRunning(false); }
   };
 
   if (queue.length === 0) {
     return (
-      <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-6 text-center text-zinc-500">
+      <div className="studio-panel p-6 text-center text-zinc-500">
         <ListMusic className="w-8 h-8 mx-auto mb-2 text-zinc-600" />
         <p className="text-xs font-semibold text-zinc-300">Your Scrobble Queue is Empty</p>
         <p className="text-[11px] text-zinc-500 mt-1 max-w-sm mx-auto">
           Use the Profile Harvester to import recents/top tracks, or the Artist Explorer to load albums and full artist pages into this queue.
         </p>
+        <div className="mt-4">{importControl}</div>
+        {feedback && <p role="alert" className="text-rose-300 text-xs mt-3">{feedback}</p>}
       </div>
     );
   }
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden p-6 space-y-4">
+    <div className="studio-panel overflow-hidden p-6 space-y-4">
       {/* Header & Stats */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">
         <div>
@@ -80,8 +104,11 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {importControl}
+          <button className="icon-button" aria-label="Export queue JSON" onClick={exportQueue}><Download size={14} /></button>
           <button
+            aria-label="Shuffle queue"
             onClick={onShuffleQueue}
             className="p-2 text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs transition-colors"
             title="Shuffle Queue"
@@ -109,6 +136,8 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
         </div>
       </div>
 
+      {isStreaming && <p className="text-xs text-amber-300">The active job uses a saved queue snapshot. Edits below apply to the next session.</p>}
+      {feedback && <p role="status" className="text-xs text-zinc-400">{feedback}</p>}
       {/* Main Execution Bar */}
       <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center space-x-2">
@@ -125,7 +154,7 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
           </select>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => onStartStreamingQueue(queue, isLooping)}
@@ -152,7 +181,7 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
       {/* Track List */}
       <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
         {queue.map((track, idx) => {
-          const isCurrentlyPlaying = isStreaming && currentTrackIndex === idx;
+          const isCurrentlyPlaying = isStreaming && currentTrackId === track.id;
 
           return (
             <div
@@ -198,7 +227,9 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center space-x-3 shrink-0">
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button aria-label={`Move ${track.name} up`} disabled={idx === 0} className="text-zinc-500 hover:text-white disabled:opacity-20" onClick={() => onReorder(track.id, -1)}><ArrowUp size={13} /></button>
+                <button aria-label={`Move ${track.name} down`} disabled={idx === queue.length - 1} className="text-zinc-500 hover:text-white disabled:opacity-20" onClick={() => onReorder(track.id, 1)}><ArrowDown size={13} /></button>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {track.duration
                     ? `${Math.floor(track.duration / 60)}:${(track.duration % 60)
@@ -209,6 +240,7 @@ export const ActiveQueueManager: React.FC<ActiveQueueManagerProps> = ({
                 <button
                   onClick={() => onRemoveTrack(track.id)}
                   className="p-1 text-zinc-500 hover:text-red-400 transition-colors"
+                  aria-label={`Remove ${track.name} from queue`}
                   title="Remove from queue"
                 >
                   <Trash2 className="w-3.5 h-3.5" />

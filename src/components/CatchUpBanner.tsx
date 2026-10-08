@@ -41,7 +41,8 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
   onDismiss,
   onSimulateIdle,
 }) => {
-  const [resumeLive, setResumeLive] = useState(true);
+  const [feedback, setFeedback] = useState('');
+  const [resumeLive, setResumeLive] = useState(false);
   const [sourceType, setSourceType] = useState<'recents' | 'queue' | 'active_track'>('recents');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [customCount, setCustomCount] = useState<number | null>(null);
@@ -116,13 +117,15 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
     const startTimeSec = Math.floor(lastActiveTime / 1000);
     const endTimeSec = Math.floor(Date.now() / 1000);
 
-    await onCatchUpBatch({
+    if (!window.confirm(`Submit ${tracks.length} estimated plays? These are not recovered playback records and may duplicate existing history.`)) { setIsSubmitting(false); return; }
+    const ok = await onCatchUpBatch({
       tracks,
       startTime: startTimeSec,
       endTime: endTimeSec,
       resumeLive,
     });
     setIsSubmitting(false);
+    if (!ok) setFeedback('Backfill was not fully accepted. Check activity results before resubmitting.');
   };
 
   return (
@@ -137,7 +140,7 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
           <div className="space-y-1.5">
             <div className="flex items-center space-x-2">
               <span className="text-xs font-bold uppercase tracking-wider text-amber-400 font-mono">
-                Live Session Idle Gap ({idleFormatted})
+                Estimated backfill ({idleFormatted})
               </span>
               <span className="text-[10px] px-2 py-0.5 rounded bg-amber-900/80 text-amber-200 border border-amber-700 font-mono">
                 {isOneHourOrMore ? '> 1 Hour Gap' : 'Recent Gap'}
@@ -149,15 +152,15 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
             </h3>
 
             <p className="text-xs text-zinc-300 leading-relaxed max-w-xl">
-              Last playback activity was recorded at{' '}
+              Last recorded activity was at{' '}
               <strong className="text-amber-300 font-mono">
                 {new Date(lastActiveTime).toLocaleTimeString([], {
                   hour: '2-digit',
                   minute: '2-digit',
                 })}
               </strong>
-              . You can automatically catch up and backfill the ~
-              <strong className="text-white">{trackCountToUse} missing tracks</strong> into this gap.
+              . This does not prove any plays are missing. Preview an estimated backfill of ~
+              <strong className="text-white">{trackCountToUse} estimated tracks</strong> into this gap.
             </p>
           </div>
         </div>
@@ -181,6 +184,8 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
         </div>
       </div>
 
+{feedback && <p role="alert" className="text-xs text-rose-300 mt-3">{feedback}</p>}
+      <details className="text-xs text-zinc-400 mt-4"><summary className="cursor-pointer">Preview estimated tracks and time range</summary><p className="mt-2">{new Date(lastActiveTime).toLocaleString()} → {new Date().toLocaleString()}</p><ol className="mt-2 max-h-40 overflow-auto space-y-1">{generateMissingTracks().map((track, i) => <li key={i}>{i + 1}. {track.artist} — {track.name}</li>)}</ol></details>
       {/* Catch-up Configuration Row */}
       <div className="mt-4 pt-3 border-t border-amber-900/40 flex flex-wrap items-center justify-between gap-3 text-xs">
         {/* Source selector */}
@@ -228,14 +233,15 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
             type="number"
             min="1"
             max="150"
+            aria-label="Estimated backfill track count"
             value={trackCountToUse}
-            onChange={(e) => setCustomCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
+            onChange={(e) => setCustomCount(Math.min(150, Math.max(1, parseInt(e.target.value, 10) || 1)))}
             className="w-16 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-center font-mono text-zinc-100"
           />
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center space-x-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center space-x-1.5 cursor-pointer text-zinc-300">
             <input
               type="checkbox"
@@ -256,7 +262,7 @@ export const CatchUpBanner: React.FC<CatchUpBannerProps> = ({
             <span>
               {isSubmitting
                 ? 'Backfilling Gap...'
-                : `Catch-up ${trackCountToUse} Missing Tracks`}
+                : `Catch-up ${trackCountToUse} Estimated Tracks`}
             </span>
           </button>
         </div>

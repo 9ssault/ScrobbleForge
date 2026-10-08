@@ -1,1 +1,36 @@
 @import "tailwindcss";
+
+@theme {
+  --color-zinc-850: #202024;
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+}
+:root { color-scheme: dark; background: #09090b; }
+body { margin: 0; -webkit-font-smoothing: antialiased; }
+button, a, input, select { -webkit-tap-highlight-color: transparent; }
+button:not(:disabled), a { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button, input, select, a { transition: background-color .18s, border-color .18s, color .18s; }
+:focus-visible { outline: 2px solid #fb7185; outline-offset: 3px; }
+input:not([type="checkbox"]), select { border: 1px solid #303036; background: #111114; border-radius: 10px; color: #e4e4e7; }
+input::placeholder { color: #71717a; }
+input:focus, select:focus { border-color: #e75b69; }
+button { min-height: 32px; }
+.studio-panel { background: linear-gradient(160deg, #151518, #111114); border: 1px solid #29292f; border-radius: 18px; box-shadow: 0 8px 32px #00000015; }
+.metric-card { padding: 20px; background: linear-gradient(145deg, #18181c, #111114); border: 1px solid #29292f; border-radius: 16px; }
+.secondary-button { padding: 8px 12px; color: #d4d4d8; border: 1px solid #34343a; border-radius: 9px; background: #1c1c21; }
+.secondary-button:hover { background: #29292f; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 9px; color: #a1a1aa; border: 1px solid #303036; background: #1a1a1f; }
+.icon-button:hover { color: #fafafa; background: #27272a; }
+.panel-icon { background: #ef44440d; color: #f87171; border: 1px solid #ef444426; border-radius: 11px; padding: 10px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
+.workspace-tabs { scrollbar-width: none; }
+.workspace-tabs::-webkit-scrollbar { display: none; }
+* { scrollbar-width: thin; scrollbar-color: #3f3f46 transparent; }
+@media (max-width: 640px) {
+  .metric-card { padding: 16px; }
+  .mobile-wrap { flex-wrap: wrap; gap: 10px; }
+  button, .secondary-button { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

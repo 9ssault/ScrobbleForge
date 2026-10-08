@@ -1,300 +1,103 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-  Terminal,
-  Copy,
-  Download,
-  Trash2,
-  Lock,
-  Unlock,
-  AlertTriangle,
-  Clock,
-  CheckCircle2,
-  XCircle,
-  Info,
-  PauseCircle,
-  PlayCircle,
-} from 'lucide-react';
+import { Activity, Download, Trash2, AlertTriangle, CheckCircle2, XCircle, Info, Search, ChevronDown, ArrowDown, Database, LoaderCircle } from 'lucide-react';
 import { JobState, ScrobbleLog } from '../types';
 
-interface LiveConsoleProps {
-  job: JobState;
-  onClearLogs: () => void;
-}
-
-export const LiveConsole: React.FC<LiveConsoleProps> = ({ job, onClearLogs }) => {
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [filterLevel, setFilterLevel] = useState<'all' | 'success' | 'warn' | 'error' | 'rate_limit'>('all');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [copyFeedback, setCopyFeedback] = useState(false);
-  const [countdown, setCountdown] = useState<number>(0);
-
-  const logsEndRef = useRef<HTMLDivElement>(null);
-
-  // Auto-scroll when logs change
+interface LiveConsoleProps { job: JobState; onClearLogs: () => void; cooldownResumeAt?: number | null; connection: string }
+export const LiveConsole: React.FC<LiveConsoleProps> = ({ job, onClearLogs, cooldownResumeAt, connection }) => {
+  const [logs, setLogs] = useState<ScrobbleLog[]>([]);
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextBefore, setNextBefore] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [autoScroll, setAutoScroll] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [clearedAt, setClearedAt] = useState(0);
+  const viewport = useRef<HTMLDivElement>(null);
+  const generation = useRef(0);
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   useEffect(() => {
-    if (autoScroll && logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [job.logs, autoScroll]);
-
-  // Rate limit cooldown timer
+    const controller = new AbortController();
+    const id = ++generation.current;
+    const timer = setTimeout(async () => {
+      setLoading(true); setError('');
+      try {
+        const query = new URLSearchParams({ level: filter, search, limit: '100' });
+        const response = await fetch(`/api/activity?${query}`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Could not read saved activity.');
+        const data = await response.json();
+        if (generation.current === id) { setLogs(previous => { const newest = data.logs.at(-1)?.seq || 0; const combined = [...data.logs, ...previous.filter(log => (log.seq || 0) > newest)]; return [...new Map(combined.map((log: ScrobbleLog) => [log.id, log])).values()]; }); setHasMore(data.hasMore); setNextBefore(data.nextBefore); }
+      } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Activity unavailable.'); }
+      finally { if (generation.current === id) setLoading(false); }
+    }, 200);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [filter, search, connection]);
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (job.status === 'rate_limited' && job.rateLimitResumeAt) {
-      const updateTimer = () => {
-        const remaining = Math.max(0, Math.ceil((job.rateLimitResumeAt! - Date.now()) / 1000));
-        setCountdown(remaining);
-      };
-      updateTimer();
-      timer = setInterval(updateTimer, 1000);
-    } else {
-      setCountdown(0);
-    }
-    return () => clearInterval(timer);
-  }, [job.status, job.rateLimitResumeAt]);
-
-  const percentage =
-    job.limit > 0 ? Math.min(100, Math.round((job.scrobblesCompleted / job.limit) * 100)) : 0;
-
-  // Calculate speed & ETA
-  let speedText = '—';
-  let etaText = '—';
-  if (job.startedAt && job.scrobblesCompleted > 0 && job.status === 'running') {
-    const elapsedMinutes = (Date.now() - job.startedAt) / 60000;
-    if (elapsedMinutes > 0.05) {
-      const ratePerMin = Math.round(job.scrobblesCompleted / elapsedMinutes);
-      speedText = `${ratePerMin} / min`;
-      const remainingScrobbles = job.limit - job.scrobblesCompleted;
-      if (ratePerMin > 0 && remainingScrobbles > 0) {
-        const remainingMinutes = Math.ceil(remainingScrobbles / ratePerMin);
-        if (remainingMinutes > 60) {
-          const hours = Math.floor(remainingMinutes / 60);
-          const mins = remainingMinutes % 60;
-          etaText = `~${hours}h ${mins}m`;
-        } else {
-          etaText = `~${remainingMinutes} min`;
-        }
+    setLogs(previous => {
+      const byId = new Map(previous.map(log => [log.id, log]));
+      for (const log of job.logs) {
+        if ((filter === 'all' || log.level === filter) && (!search || JSON.stringify(log).toLowerCase().includes(search.toLowerCase()))) byId.set(log.id, log);
       }
-    }
+      return [...byId.values()].sort((a, b) => (a.seq || 0) - (b.seq || 0));
+    });
+  }, [job.logs, filter, search]);
+  useEffect(() => { if (autoScroll && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight; }, [logs, autoScroll]);
+  async function loadOlder() {
+    if (!nextBefore || loading) return;
+    const id = generation.current;
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/activity?${new URLSearchParams({ before: String(nextBefore), level: filter, search, limit: '100' })}`);
+      if (!response.ok) throw new Error('Could not load older records.');
+      const data = await response.json();
+      if (id !== generation.current) return;
+      setLogs(previous => [...new Map([...data.logs, ...previous].map((log: ScrobbleLog) => [log.id, log])).values()]);
+      setHasMore(data.hasMore); setNextBefore(data.nextBefore);
+    } catch (e) { setError(e instanceof Error ? e.message : 'History unavailable.'); }
+    finally { if (id === generation.current) setLoading(false); }
   }
-
-  const handleCopyLogs = () => {
-    const text = job.logs
-      .map((l) => `[${new Date(l.timestamp).toLocaleTimeString()}] [${l.level.toUpperCase()}] ${l.message}`)
-      .join('\n');
-    navigator.clipboard.writeText(text);
-    setCopyFeedback(true);
-    setTimeout(() => setCopyFeedback(false), 2000);
-  };
-
-  const handleDownloadLogs = () => {
-    const text = job.logs
-      .map((l) => `[${new Date(l.timestamp).toISOString()}] [${l.level.toUpperCase()}] ${l.message}`)
-      .join('\n');
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `scrobbleforge-${Date.now()}.log`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const filteredLogs = job.logs.filter((log) => {
-    if (filterLevel !== 'all' && log.level !== filterLevel) return false;
-    if (searchTerm && !log.message.toLowerCase().includes(searchTerm.toLowerCase())) return false;
-    return true;
-  });
-
-  return (
-    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-      {/* Terminal Title Bar */}
-      <div className="px-5 py-3 border-b border-zinc-800/80 bg-zinc-900/80 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="flex space-x-1.5">
-            <div className="w-3 h-3 rounded-full bg-red-500/80" />
-            <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
-            <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
-          </div>
-          <div className="flex items-center space-x-2">
-            <Terminal className="w-4 h-4 text-zinc-400" />
-            <span className="text-xs font-mono font-medium text-zinc-300">
-              Scrobble Engine Terminal
-            </span>
-          </div>
-        </div>
-
-        {/* Toolbar */}
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-1.5 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors ${
-              autoScroll
-                ? 'bg-zinc-800 text-zinc-200'
-                : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
-            }`}
-            title={autoScroll ? 'Auto-scroll is ON' : 'Auto-scroll is OFF'}
-          >
-            {autoScroll ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-            <span className="text-[10px] hidden sm:inline">Auto-scroll</span>
-          </button>
-          <button
-            onClick={handleCopyLogs}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
-            title="Copy logs"
-          >
-            <Copy className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={handleDownloadLogs}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
-            title="Download log file"
-          >
-            <Download className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={onClearLogs}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-red-400 text-xs transition-colors"
-            title="Clear console"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
+  const resumeAt = cooldownResumeAt || job.rateLimitResumeAt;
+  const seconds = resumeAt ? Math.max(0, Math.ceil((resumeAt - now) / 1000)) : 0;
+  const processed = job.scrobblesCompleted + (job.ignoredCount || 0) + (job.simulatedCount || 0);
+  const percentage = job.startedAt && job.limit ? Math.min(100, processed / job.limit * 100) : 0;
+  const visible = logs.filter(log => log.timestamp > clearedAt && (filter === 'all' || log.level === filter) && (!search || JSON.stringify(log).toLowerCase().includes(search.toLowerCase())));
+  return <section className="studio-panel overflow-hidden" aria-label="Activity journal">
+    <div className="p-5 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/70">
+      <div className="flex items-center gap-3"><div className="panel-icon"><Activity size={18} /></div><div><h2 className="text-sm font-semibold">Activity journal</h2><p className="text-xs text-zinc-500 mt-0.5">Every operation. A persistent, inspectable trail.</p></div></div>
+      <div className="flex items-center gap-2">
+        <a href="/api/activity/export" className="secondary-button text-xs flex items-center gap-2" title="Export all retained records, not only visible entries"><Download size={14} />Export NDJSON</a>
+        <button aria-label="Clear console view without deleting saved activity" className="icon-button" onClick={() => { setClearedAt(Date.now()); onClearLogs(); }}><Trash2 size={15} /></button>
       </div>
-
-      {/* Progress & Live Telemetry Gauge */}
-      <div className="px-5 py-4 border-b border-zinc-850 bg-zinc-900/40">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-          <div className="flex items-center space-x-2 font-mono text-xs">
-            <span className="text-zinc-400">Target:</span>
-            <span className="font-semibold text-zinc-200">
-              {job.artist} — {job.track}
-            </span>
-          </div>
-          <div className="flex items-center space-x-4 text-xs font-mono">
-            <div>
-              <span className="text-zinc-500 mr-1.5">Rate:</span>
-              <span className="text-zinc-300">{speedText}</span>
-            </div>
-            <div>
-              <span className="text-zinc-500 mr-1.5">ETA:</span>
-              <span className="text-zinc-300">{etaText}</span>
-            </div>
-            <div>
-              <span className="text-zinc-500 mr-1.5">Progress:</span>
-              <span className="font-bold text-red-400">
-                {job.scrobblesCompleted} / {job.limit} ({percentage}%)
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Progress Bar */}
-        <div className="w-full bg-zinc-800 h-2.5 rounded-full overflow-hidden relative">
-          <div
-            className={`h-full transition-all duration-300 ${
-              job.status === 'completed'
-                ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
-                : job.status === 'rate_limited'
-                ? 'bg-gradient-to-r from-amber-500 to-yellow-400'
-                : 'bg-gradient-to-r from-red-600 via-rose-500 to-orange-500'
-            }`}
-            style={{ width: `${percentage}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Rate Limit Active Notice */}
-      {job.status === 'rate_limited' && (
-        <div className="bg-amber-950/70 border-b border-amber-900/60 px-5 py-2.5 flex items-center justify-between text-xs text-amber-200 font-mono">
-          <div className="flex items-center space-x-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
-            <span>
-              Last.fm Rate Limit reached (Code 26). Engine is waiting for cooldown...
-            </span>
-          </div>
-          <span className="font-bold px-2 py-0.5 rounded bg-amber-900/80 border border-amber-700/60 text-amber-300">
-            Resuming in {countdown}s
-          </span>
-        </div>
-      )}
-
-      {/* Filter / Search Bar */}
-      <div className="px-5 py-2 border-b border-zinc-900 bg-zinc-950/90 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center space-x-1">
-          {(['all', 'success', 'rate_limit', 'warn', 'error'] as const).map((lvl) => (
-            <button
-              key={lvl}
-              onClick={() => setFilterLevel(lvl)}
-              className={`px-2 py-0.5 rounded text-[11px] font-mono capitalize transition-colors ${
-                filterLevel === lvl
-                  ? 'bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              {lvl === 'all' ? 'All Logs' : lvl.replace('_', ' ')}
-            </button>
-          ))}
-        </div>
-        <input
-          type="text"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Filter messages..."
-          className="bg-zinc-900 border border-zinc-800 rounded px-2 py-0.5 text-[11px] text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-red-500"
-        />
-      </div>
-
-      {/* Terminal Output Area */}
-      <div className="p-5 font-mono text-xs overflow-y-auto max-h-96 min-h-[260px] bg-zinc-950 space-y-1.5 select-text">
-        {filteredLogs.length === 0 ? (
-          <div className="text-zinc-600 italic py-8 text-center">
-            {job.logs.length === 0
-              ? 'Console initialized. Click "Start Scrobble Stream" to begin.'
-              : 'No log entries match the current filter.'}
-          </div>
-        ) : (
-          filteredLogs.map((log) => {
-            let colorClass = 'text-zinc-300';
-            let icon = <Info className="w-3.5 h-3.5 text-zinc-500 shrink-0" />;
-
-            if (log.level === 'success') {
-              colorClass = 'text-emerald-400';
-              icon = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />;
-            } else if (log.level === 'rate_limit') {
-              colorClass = 'text-amber-400';
-              icon = <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
-            } else if (log.level === 'warn') {
-              colorClass = 'text-yellow-300';
-              icon = <AlertTriangle className="w-3.5 h-3.5 text-yellow-500 shrink-0" />;
-            } else if (log.level === 'error') {
-              colorClass = 'text-rose-400';
-              icon = <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />;
-            }
-
-            return (
-              <div
-                key={log.id}
-                className="flex items-start space-x-2 leading-relaxed hover:bg-zinc-900/40 px-1 py-0.5 rounded transition-colors"
-              >
-                <span className="text-zinc-600 select-none shrink-0 text-[11px]">
-                  {new Date(log.timestamp).toLocaleTimeString()}
-                </span>
-                <span className="shrink-0">{icon}</span>
-                <span className={`break-all ${colorClass}`}>{log.message}</span>
-              </div>
-            );
-          })
-        )}
-        <div ref={logsEndRef} />
-      </div>
-
-      {/* Copy Notification Toast */}
-      {copyFeedback && (
-        <div className="bg-emerald-950 border-t border-emerald-900 text-emerald-300 text-xs py-1.5 text-center font-mono animate-in fade-in">
-          Logs copied to clipboard!
-        </div>
-      )}
     </div>
-  );
+    <div className="px-5 py-4 bg-zinc-950/30 border-b border-zinc-800/60">
+      <div className="flex flex-wrap justify-between gap-2 text-xs mb-3"><span className="text-zinc-400">Current job <span className="text-zinc-200 ml-2">{job.startedAt ? `${job.queueMode === 'single_loop' ? job.track : 'Queue stream'}` : 'No active session'}</span></span><span className="text-zinc-500 tabular-nums">{job.scrobblesCompleted} accepted · {job.ignoredCount || 0} ignored · {job.simulatedCount || 0} simulated</span></div>
+      <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden" role="progressbar" aria-label="Job progress" aria-valuenow={Math.round(percentage)} aria-valuemin={0} aria-valuemax={100}><div className={`h-full rounded-full transition-all ${seconds ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${percentage}%` }} /></div>
+    </div>
+    {seconds > 0 && <div role="status" className="p-4 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between gap-3 text-xs text-amber-300"><span className="flex items-center gap-2"><AlertTriangle size={16} />Last.fm cooldown active. New requests are deferred.</span><span className="font-mono shrink-0">{seconds}s remaining</span></div>}
+    {job.currentError && <div role="alert" className="px-5 py-3 text-xs text-rose-300 bg-rose-500/10">{job.currentError}</div>}
+    <div className="p-4 flex flex-wrap items-center gap-3 border-b border-zinc-800/60">
+      <label className="relative flex-1 min-w-40"><Search size={14} className="absolute left-3 top-3 text-zinc-500" /><input aria-label="Search activity records" value={search} onChange={e => { setSearch(e.target.value); setClearedAt(0); }} placeholder="Search events, tracks, methods…" className="w-full pl-9 pr-3 py-2.5 text-xs" /></label>
+      <select aria-label="Filter activity severity" value={filter} onChange={e => { setFilter(e.target.value); setClearedAt(0); }} className="py-2.5 px-3 text-xs"><option value="all">All events</option><option value="info">Information</option><option value="success">Success</option><option value="rate_limit">Rate limits</option><option value="warn">Warnings</option><option value="error">Errors</option></select>
+      <button className={`icon-button ${autoScroll ? 'text-red-400' : ''}`} aria-label="Follow latest events" aria-pressed={autoScroll} onClick={() => setAutoScroll(!autoScroll)}><ArrowDown size={15} /></button>
+    </div>
+    {error && <p role="alert" className="p-4 text-xs text-rose-300">{error}</p>}
+    <div ref={viewport} className="max-h-[460px] min-h-[280px] overflow-y-auto p-3 space-y-1">
+      {(hasMore || clearedAt > 0) && <button className="w-full secondary-button text-xs mb-3" disabled={loading} onClick={() => { setClearedAt(0); if (hasMore) void loadOlder(); }}>{loading ? 'Loading…' : clearedAt ? 'Restore saved history' : 'Load older events'}</button>}
+      {visible.length === 0 && <div className="py-16 text-center"><Database size={28} className="mx-auto text-zinc-600 mb-3" /><p className="text-sm text-zinc-300">{loading ? 'Reading the journal…' : 'No events to display'}</p><p className="text-xs text-zinc-500 mt-2">{search || filter !== 'all' ? 'Try another filter or search term.' : 'Connect your account or start a dry run to record activity.'}</p></div>}
+      {visible.map(log => {
+        const tone = log.level === 'success' ? 'text-emerald-400' : log.level === 'error' ? 'text-rose-400' : log.level === 'rate_limit' || log.level === 'warn' ? 'text-amber-400' : 'text-zinc-500';
+        const Icon = log.level === 'success' ? CheckCircle2 : log.level === 'error' ? XCircle : log.level === 'rate_limit' || log.level === 'warn' ? AlertTriangle : Info;
+        return <div key={log.id} className="rounded-xl hover:bg-white/[0.025] border border-transparent hover:border-zinc-800/60">
+          <button className="w-full text-left flex items-start gap-3 p-3" onClick={() => setExpanded(expanded === log.id ? null : log.id)} aria-expanded={expanded === log.id}>
+            <Icon size={15} className={`${tone} shrink-0 mt-0.5`} /><div className="min-w-0 flex-1"><p className="text-xs text-zinc-300 leading-relaxed break-words">{log.message}</p><div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-500 mt-1.5"><time dateTime={new Date(log.timestamp).toISOString()}>{new Date(log.timestamp).toLocaleString()}</time><span>·</span><span>{log.operation || log.category || 'job'}</span>{log.durationMs !== undefined && <span className="font-mono">{log.durationMs}ms</span>}{log.level === 'rate_limit' && <span className="text-amber-400">RATE LIMIT</span>}</div></div><ChevronDown size={13} className="text-zinc-600 shrink-0" />
+          </button>
+          {expanded === log.id && <dl className="ml-10 mr-3 mb-3 p-3 bg-zinc-950/70 rounded-lg grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">{Object.entries(log).filter(([key]) => !['message', 'timestamp', 'level'].includes(key)).map(([key, value]) => <div key={key} className="min-w-0"><dt className="text-zinc-500">{key}</dt><dd className="text-zinc-300 font-mono break-all">{String(value)}</dd></div>)}</dl>}
+        </div>;
+      })}
+      {loading && <LoaderCircle size={18} className="animate-spin text-zinc-500 mx-auto my-3" />}
+    </div>
+    <div className="px-5 py-3 border-t border-zinc-800/60 text-[11px] text-zinc-500 flex flex-wrap justify-between gap-2"><span>{visible.length} loaded events · Clear view never deletes history</span><span>Credentials and raw payloads are never journaled</span></div>
+  </section>;
 };

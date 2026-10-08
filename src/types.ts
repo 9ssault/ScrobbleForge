@@ -38,6 +38,7 @@ export interface RecentTrack {
 
 export interface ScrobbleLog {
   id: string;
+  seq?: number;
   timestamp: number;
   level: 'info' | 'success' | 'warn' | 'error' | 'rate_limit';
   message: string;
@@ -46,6 +47,35 @@ export interface ScrobbleLog {
   album?: string;
   count?: number;
   total?: number;
+  category?: 'api' | 'job' | 'auth' | 'system';
+  operation?: string;
+  jobId?: string;
+  requestId?: string;
+  outcome?: 'attempt' | 'accepted' | 'ignored' | 'failed' | 'rate_limited' | 'success' | 'simulated' | 'uncertain' | 'deferred';
+  httpStatus?: number;
+  errorCode?: number;
+  durationMs?: number;
+  retryAfterSeconds?: number;
+  accepted?: number;
+  ignored?: number;
+  attempted?: number;
+  scrobbleTimestamp?: number;
+}
+
+export interface ActivitySummary {
+  totalEvents: number;
+  accepted: number;
+  ignored: number;
+  failedRequests: number;
+  rateLimitHits: number;
+  requests: number;
+  simulated: number;
+  uncertainRequests: number;
+  retentionDays: number;
+  healthy: boolean;
+  cooldownResumeAt: number | null;
+  oldestAt: number | null;
+  latestAt: number | null;
 }
 
 export interface IdleGapInfo {
@@ -57,6 +87,9 @@ export interface IdleGapInfo {
 }
 
 export interface JobState {
+  jobId?: string;
+  ignoredCount?: number;
+  simulatedCount?: number;
   status: 'idle' | 'running' | 'paused' | 'rate_limited' | 'completed' | 'error';
   artist: string;
   track: string;

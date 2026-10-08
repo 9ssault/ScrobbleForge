@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Search,
   User,
@@ -28,6 +28,8 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
   onInstantBatchScrobble,
   onStartStreamingQueue,
 }) => {
+  const searchRequest = useRef(0);
+  const entityRequest = useRef(0);
   const [searchTarget, setSearchTarget] = useState<'user' | 'artist' | 'album' | 'track'>('artist');
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -46,12 +48,16 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!query.trim() || !apiKey) return;
+    if (!query.trim()) return;
+    if (!apiKey) { setFeedback('Connect Last.fm to search the catalog.'); return; }
 
+    const request = ++searchRequest.current;
+    ++entityRequest.current;
     setIsLoading(true);
     setFeedback(null);
     setSelectedEntityTitle(null);
     setEntityTracks([]);
+    setArtistResults([]); setAlbumResults([]); setTrackResults([]); setUserResult(null);
 
     try {
       if (searchTarget === 'user') {
@@ -59,6 +65,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
           `/api/lastfm/search-user?username=${encodeURIComponent(query.trim())}&apiKey=${apiKey}`
         );
         const data = await res.json();
+        if (request !== searchRequest.current) return;
         if (data.ok && data.user) {
           setUserResult({ ...data.user, recentTracks: data.recentTracks || [] });
           setFeedback(`Found Last.fm user @${data.user.name}`);
@@ -71,55 +78,61 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
           `/api/lastfm/search-artist?query=${encodeURIComponent(query.trim())}&apiKey=${apiKey}`
         );
         const data = await res.json();
+        if (request !== searchRequest.current) return;
         if (data.ok && data.artists) {
           setArtistResults(data.artists);
           setFeedback(`Found ${data.artists.length} artists matching "${query}"`);
         } else {
           setArtistResults([]);
-          setFeedback('No matching artists found.');
+          setFeedback(data.error || 'No matching artists found.');
         }
       } else if (searchTarget === 'album') {
         const res = await fetch(
           `/api/lastfm/search-album?query=${encodeURIComponent(query.trim())}&apiKey=${apiKey}`
         );
         const data = await res.json();
+        if (request !== searchRequest.current) return;
         if (data.ok && data.albums) {
           setAlbumResults(data.albums);
           setFeedback(`Found ${data.albums.length} albums matching "${query}"`);
         } else {
           setAlbumResults([]);
-          setFeedback('No matching albums found.');
+          setFeedback(data.error || 'No matching albums found.');
         }
       } else if (searchTarget === 'track') {
         const res = await fetch(
           `/api/lastfm/search?track=${encodeURIComponent(query.trim())}&apiKey=${apiKey}`
         );
         const data = await res.json();
+        if (request !== searchRequest.current) return;
         if (data.ok && data.tracks) {
           const list = Array.isArray(data.tracks) ? data.tracks : [data.tracks];
           setTrackResults(list);
           setFeedback(`Found ${list.length} tracks matching "${query}"`);
         } else {
           setTrackResults([]);
-          setFeedback('No matching tracks found.');
+          setFeedback(data.error || 'No matching tracks found.');
         }
       }
     } catch (err: any) {
-      setFeedback(`Search error: ${err.message}`);
+      if (request === searchRequest.current) setFeedback(`Search error: ${err.message}`);
     } finally {
-      setIsLoading(false);
+      if (request === searchRequest.current) setIsLoading(false);
     }
   };
 
   // Inspect Album to load tracklist
   const handleInspectAlbum = async (artist: string, album: string) => {
+    const request = ++entityRequest.current;
     setIsLoadingEntity(true);
+    setEntityTracks([]);
     setSelectedEntityTitle(`Album: ${album} by ${artist}`);
     try {
       const res = await fetch(
         `/api/lastfm/fetch-album-tracks?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}&apiKey=${apiKey}`
       );
       const data = await res.json();
+      if (request !== entityRequest.current) return;
       if (data.ok && data.tracks) {
         setEntityTracks(data.tracks);
         setFeedback(`Loaded ${data.tracks.length} tracks from album "${album}"`);
@@ -128,21 +141,24 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         setFeedback('Could not fetch album tracks.');
       }
     } catch (err: any) {
-      setFeedback(`Error: ${err.message}`);
+      if (request === entityRequest.current) setFeedback(`Error: ${err.message}`);
     } finally {
-      setIsLoadingEntity(false);
+      if (request === entityRequest.current) setIsLoadingEntity(false);
     }
   };
 
   // Inspect Artist to load top tracks
   const handleInspectArtist = async (artistName: string) => {
+    const request = ++entityRequest.current;
     setIsLoadingEntity(true);
+    setEntityTracks([]);
     setSelectedEntityTitle(`Artist: ${artistName} (Top Tracks)`);
     try {
       const res = await fetch(
         `/api/lastfm/fetch-artist-tracks?artist=${encodeURIComponent(artistName)}&limit=40&apiKey=${apiKey}`
       );
       const data = await res.json();
+      if (request !== entityRequest.current) return;
       if (data.ok && data.tracks) {
         setEntityTracks(data.tracks);
         setFeedback(`Loaded ${data.tracks.length} top tracks for ${artistName}`);
@@ -151,14 +167,14 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         setFeedback('Could not fetch artist tracks.');
       }
     } catch (err: any) {
-      setFeedback(`Error: ${err.message}`);
+      if (request === entityRequest.current) setFeedback(`Error: ${err.message}`);
     } finally {
-      setIsLoadingEntity(false);
+      if (request === entityRequest.current) setIsLoadingEntity(false);
     }
   };
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden p-6 space-y-6">
+    <div className="studio-panel overflow-hidden p-6 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-zinc-800">
         <div>
@@ -179,6 +195,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         <button
           type="button"
           onClick={() => {
+            ++searchRequest.current; ++entityRequest.current; setIsLoading(false); setIsLoadingEntity(false); setSelectedEntityTitle(null); setEntityTracks([]);
             setSearchTarget('user');
             setQuery('');
             setFeedback(null);
@@ -196,6 +213,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         <button
           type="button"
           onClick={() => {
+            ++searchRequest.current; ++entityRequest.current; setIsLoading(false); setIsLoadingEntity(false); setSelectedEntityTitle(null); setEntityTracks([]);
             setSearchTarget('artist');
             setQuery('');
             setFeedback(null);
@@ -213,6 +231,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         <button
           type="button"
           onClick={() => {
+            ++searchRequest.current; ++entityRequest.current; setIsLoading(false); setIsLoadingEntity(false); setSelectedEntityTitle(null); setEntityTracks([]);
             setSearchTarget('album');
             setQuery('');
             setFeedback(null);
@@ -230,6 +249,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         <button
           type="button"
           onClick={() => {
+            ++searchRequest.current; ++entityRequest.current; setIsLoading(false); setIsLoadingEntity(false); setSelectedEntityTitle(null); setEntityTracks([]);
             setSearchTarget('track');
             setQuery('');
             setFeedback(null);
@@ -250,6 +270,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-500" />
           <input
+            aria-label="Search Last.fm"
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -277,7 +298,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
       {/* Feedback message */}
       {feedback && (
         <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-300 flex items-center space-x-2">
-          <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+          <Search className="w-4 h-4 text-zinc-400 shrink-0" />
           <span>{feedback}</span>
         </div>
       )}
@@ -317,7 +338,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
               </div>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => {
                   const mapped: QueueTrack[] = (userResult.recentTracks || []).map((t: any, idx: number) => ({
@@ -398,6 +419,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
           {artistResults.map((artist, idx) => (
             <div
               key={idx}
+              role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void handleInspectArtist(artist.name); } }}
               onClick={() => handleInspectArtist(artist.name)}
               className="p-3 bg-zinc-950/70 border border-zinc-800/80 hover:border-red-500/80 rounded-xl cursor-pointer transition-all flex items-center justify-between group hover:bg-zinc-850"
             >
@@ -430,6 +452,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
           {albumResults.map((album, idx) => (
             <div
               key={idx}
+              role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void handleInspectAlbum(album.artist, album.name); } }}
               onClick={() => handleInspectAlbum(album.artist, album.name)}
               className="p-2.5 bg-zinc-950/70 border border-zinc-800/80 hover:border-red-500/80 rounded-xl cursor-pointer transition-all flex flex-col group hover:bg-zinc-850"
             >
@@ -510,7 +533,7 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">
             <div>
               <button
-                onClick={() => setSelectedEntityTitle(null)}
+                onClick={() => { ++entityRequest.current; setSelectedEntityTitle(null); setIsLoadingEntity(false); }}
                 className="text-[11px] text-zinc-500 hover:text-zinc-300 underline mb-1"
               >
                 ← Back to search results
@@ -519,8 +542,9 @@ export const UniversalSearchExplorer: React.FC<UniversalSearchExplorerProps> = (
               <p className="text-xs text-zinc-400">{entityTracks.length} tracks available</p>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
+                disabled={isLoadingEntity || entityTracks.length === 0}
                 onClick={() => {
                   onAddTracksToQueue(entityTracks);
                   setFeedback(`Added all ${entityTracks.length} tracks to queue!`);

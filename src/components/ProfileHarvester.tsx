@@ -40,12 +40,15 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
   const [fetchedTracks, setFetchedTracks] = useState<QueueTrack[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isBatchSubmitting, setIsBatchSubmitting] = useState(false);
   const [batchSpanHours, setBatchSpanHours] = useState<number>(24);
 
   const handleFetch = async () => {
-    if (!targetUser.trim() || !apiKey) return;
+    if (!targetUser.trim()) return;
+    if (!apiKey) { setStatusMessage('Connect Last.fm before importing a profile.'); return; }
     setIsLoading(true);
     setStatusMessage(null);
+    setFetchedTracks([]); setSelectedIds(new Set());
 
     try {
       const url = `/api/lastfm/fetch-profile-tracks?username=${encodeURIComponent(
@@ -102,8 +105,10 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
   const handleBatchScrobbleSelected = async () => {
     const selected = getSelectedTracks();
     if (selected.length === 0) return;
+    if (isBatchSubmitting) return; setIsBatchSubmitting(true);
     setStatusMessage(`Submitting batch of ${selected.length} songs...`);
     const ok = await onInstantBatchScrobble(selected, batchSpanHours);
+    setIsBatchSubmitting(false);
     if (ok) {
       setStatusMessage(`🎉 Successfully scrobbled all ${selected.length} tracks to Last.fm!`);
     } else {
@@ -118,7 +123,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
   };
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden p-6 space-y-6">
+    <div className="studio-panel overflow-hidden p-6 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-zinc-800">
         <div>
@@ -129,7 +134,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
             </h3>
           </div>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Extract every song, recents, top tracks, or loved songs from your profile or any Last.fm user!
+            Import recent plays, top tracks, or loved songs from a public Last.fm profile.
           </p>
         </div>
       </div>
@@ -144,6 +149,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
             </label>
             <div className="relative">
               <input
+                aria-label="Profile username to import"
                 type="text"
                 value={targetUser}
                 onChange={(e) => setTargetUser(e.target.value)}
@@ -289,7 +295,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={handleQueueSelected}
-                disabled={selectedIds.size === 0}
+                disabled={selectedIds.size === 0 || isBatchSubmitting}
                 className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-50"
               >
                 <PlusCircle className="w-3.5 h-3.5" />
@@ -298,7 +304,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
 
               <button
                 onClick={handleStreamSelected}
-                disabled={selectedIds.size === 0}
+                disabled={selectedIds.size === 0 || isBatchSubmitting}
                 className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-50"
               >
                 <Clock className="w-3.5 h-3.5 text-red-400" />
@@ -307,7 +313,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
 
               <button
                 onClick={handleBatchScrobbleSelected}
-                disabled={selectedIds.size === 0}
+                disabled={selectedIds.size === 0 || isBatchSubmitting}
                 className="flex items-center space-x-1.5 px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-medium shadow-md transition-all disabled:opacity-50"
               >
                 <Zap className="w-3.5 h-3.5" />
@@ -323,6 +329,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
               return (
                 <div
                   key={item.id}
+                  role="checkbox" aria-checked={isSelected} tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSelect(item.id); } }}
                   onClick={() => toggleSelect(item.id)}
                   className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-all border ${
                     isSelected
@@ -332,6 +339,7 @@ export const ProfileHarvester: React.FC<ProfileHarvesterProps> = ({
                 >
                   <div className="flex items-center space-x-3 min-w-0 pr-2">
                     <button
+                      aria-label={`Select ${item.name}`}
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();

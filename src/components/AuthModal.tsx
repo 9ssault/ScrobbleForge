@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Lock,
@@ -40,6 +40,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  const dialog = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    setApiKey(credentials.apiKey || ''); setUsername(credentials.username || ''); setPassword(''); setError(null); setSuccess(null);
+    const previous = document.activeElement as HTMLElement | null;
+    const oldOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const node = dialog.current;
+    node?.querySelector<HTMLInputElement>('input')?.focus();
+    const keydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !loading) onClose();
+      if (e.key !== 'Tab' || !node) return;
+      const focusable = [...node.querySelectorAll<HTMLElement>('button:not(:disabled), a, input, select')];
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener('keydown', keydown);
+    return () => { document.body.style.overflow = oldOverflow; document.removeEventListener('keydown', keydown); previous?.focus(); };
+  }, [isOpen]);
   if (!isOpen) return null;
 
   const handleFormSubmit = async (e: React.FormEvent) => {
@@ -56,11 +76,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         password: password,
       });
 
+      setPassword('');
+      setApiSecret('');
       if (ok) {
         setSuccess('Successfully authenticated with Last.fm!');
-        setTimeout(() => {
-          onClose();
-        }, 1200);
+        onClose();
       } else {
         setError('Authentication failed. Please verify your API Key, Shared Secret, username, and password.');
       }
@@ -73,14 +93,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col">
+      <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="auth-heading" className="max-h-[90dvh] overflow-y-auto bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
           <div className="flex items-center space-x-2">
             <Shield className="w-5 h-5 text-red-500" />
-            <h3 className="font-semibold text-zinc-100 text-base">Last.fm API Credentials</h3>
+            <h3 id="auth-heading" className="font-semibold text-zinc-100 text-base">Last.fm API Credentials</h3>
           </div>
           <button
+            aria-label="Close account settings"
+            disabled={loading}
             onClick={onClose}
             className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors"
           >
@@ -125,14 +147,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
+<p className="text-[11px] text-zinc-500 leading-relaxed">Passwords, secrets, and session keys are not saved in browser storage or activity records. Reconnect after reloading. This personal server forwards credentials to Last.fm over HTTPS.</p>
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-zinc-400 mb-1">
+              <label htmlFor="auth-key" className="block text-xs font-medium text-zinc-400 mb-1">
                 Last.fm API Key
               </label>
               <div className="relative">
                 <Key className="w-4 h-4 absolute left-3 top-3 text-zinc-500" />
                 <input
+                  id="auth-key"
                   type="text"
                   required
                   value={apiKey}
@@ -150,6 +174,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="relative">
                 <Lock className="w-4 h-4 absolute left-3 top-3 text-zinc-500" />
                 <input
+                  aria-label="Last.fm shared secret"
+                  autoComplete="off"
                   type="password"
                   required
                   value={apiSecret}
@@ -168,6 +194,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="relative">
                   <User className="w-4 h-4 absolute left-3 top-3 text-zinc-500" />
                   <input
+                    aria-label="Last.fm username"
+                    autoComplete="username"
                     type="text"
                     required
                     value={username}
@@ -184,6 +212,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </label>
                 <div className="relative">
                   <input
+                    aria-label="Last.fm password"
+                    autoComplete="current-password"
                     type={showPassword ? 'text' : 'password'}
                     required
                     value={password}
@@ -193,6 +223,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   />
                   <button
                     type="button"
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
                     onClick={() => setShowPassword(!showPassword)}
                     className="absolute right-3 top-2.5 text-zinc-500 hover:text-zinc-300"
                   >

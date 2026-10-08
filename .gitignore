@@ -6,3 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Durable personal activity data
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+.dev-server*
+package.json.install-backup
