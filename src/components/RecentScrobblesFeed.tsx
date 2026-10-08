@@ -28,6 +28,7 @@ interface RecentScrobblesFeedProps {
   isLoading: boolean;
   onRefresh: () => void;
   username: string;
+  enabled: boolean;
 }
 
 interface HourlyScrobblePoint {
@@ -42,6 +43,7 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
   isLoading,
   onRefresh,
   username,
+  enabled,
 }) => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [chartType, setChartType] = useState<'area' | 'bar'>('area');
@@ -49,12 +51,12 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
 
   // Auto-refresh interval (12s)
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!autoRefresh || !enabled) return;
     const interval = setInterval(() => {
-      onRefresh();
-    }, 12000);
+      if (!document.hidden) onRefresh();
+    }, 20000);
     return () => clearInterval(interval);
-  }, [autoRefresh, onRefresh]);
+  }, [autoRefresh, enabled, onRefresh]);
 
   // Compute 24-hour hourly frequency distribution using Recharts data format
   const { hourlyData, total24h, peakHour, peakCount } = useMemo(() => {
@@ -84,12 +86,8 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
     let maxHour = '';
 
     recentTracks.forEach((track) => {
-      let trackTime = now;
-      if (track['@attr']?.nowplaying === 'true') {
-        trackTime = now;
-      } else if (track.date?.uts) {
-        trackTime = parseInt(track.date.uts, 10) * 1000;
-      }
+      if (track['@attr']?.nowplaying === 'true' || !track.date?.uts) return;
+      const trackTime = parseInt(track.date.uts, 10) * 1000;
 
       const diffMs = now - trackTime;
       const diffHours = Math.floor(diffMs / 3600000);
@@ -140,16 +138,16 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
   };
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl p-5 flex flex-col space-y-4">
+    <div className="studio-panel p-5 flex flex-col space-y-4">
       {/* Top Header */}
-      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+      <div className="flex flex-wrap gap-3 items-center justify-between pb-3 border-b border-zinc-800">
         <div>
           <div className="flex items-center space-x-2">
             <Disc3
               className="w-4 h-4 text-red-500 animate-spin"
               style={{ animationDuration: '6s' }}
             />
-            <h3 className="text-sm font-bold text-zinc-100">Live Last.fm Feed</h3>
+            <h3 className="text-sm font-bold text-zinc-100">Recent listening</h3>
           </div>
           <p className="text-xs text-zinc-400 mt-0.5">
             Activity for{' '}
@@ -165,10 +163,10 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
                 ? 'bg-red-950/70 border border-red-800/60 text-red-300'
                 : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
             }`}
-            title="Toggle 24h Activity Chart"
+            title="Toggle recent-track sample chart"
           >
             <BarChart3 className="w-3.5 h-3.5" />
-            <span className="text-[10px] hidden sm:inline">24h Chart</span>
+            <span className="text-[10px] hidden sm:inline">Activity</span>
           </button>
 
           <label className="flex items-center space-x-1.5 text-xs text-zinc-400 cursor-pointer">
@@ -182,8 +180,9 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
           </label>
 
           <button
+            aria-label="Refresh recent listening"
             onClick={onRefresh}
-            disabled={isLoading}
+            disabled={isLoading || !enabled}
             className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors"
             title="Refresh feed"
           >
@@ -201,7 +200,7 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3 text-xs">
               <div>
-                <span className="text-zinc-500 mr-1.5">Last 24h:</span>
+                <span className="text-zinc-500 mr-1.5">Sample (24h):</span>
                 <span className="font-bold text-red-400 font-mono">
                   {total24h} scrobbles
                 </span>
@@ -340,11 +339,12 @@ export const RecentScrobblesFeed: React.FC<RecentScrobblesFeedProps> = ({
         </div>
       )}
 
+<p className="text-[11px] text-zinc-500 leading-relaxed">Chart covers the latest {recentTracks.length} fetched tracks, not your complete 24-hour history. Now Playing is excluded.</p>
       {/* Tracks List */}
       <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
         {recentTracks.length === 0 ? (
           <div className="py-12 text-center text-zinc-500 text-xs italic">
-            {isLoading ? 'Fetching recent scrobbles...' : 'No recent scrobbles found on profile.'}
+            {!username ? 'Connect your account to view recent listening.' : isLoading ? 'Fetching recent scrobbles…' : 'No recent scrobbles found on profile.'}
           </div>
         ) : (
           recentTracks.map((item, index) => {

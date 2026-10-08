@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import { ActivityOverview } from './components/ActivityOverview';
 import { Header } from './components/Header';
 import { AuthModal } from './components/AuthModal';
 import { ScrobblerEngine } from './components/ScrobblerEngine';
@@ -13,15 +14,16 @@ import { ArtistCatalogExplorer } from './components/ArtistCatalogExplorer';
 import { ActiveQueueManager } from './components/ActiveQueueManager';
 import { CatchUpBanner } from './components/CatchUpBanner';
 import { LiveConsole } from './components/LiveConsole';
-import { RecentScrobblesFeed } from './components/RecentScrobblesFeed';
+const RecentScrobblesFeed = lazy(() => import('./components/RecentScrobblesFeed').then(module => ({ default: module.RecentScrobblesFeed })));
 import {
   LastFmCredentials,
   LastFmUser,
   JobState,
   RecentTrack,
   QueueTrack,
+  ActivitySummary,
 } from './types';
-import { Radio, Info } from 'lucide-react';
+import { Radio, Info, ArrowUpRight, X, Search, ListMusic, Disc, Users, Zap, ShieldCheck } from 'lucide-react';
 
 const STORAGE_CREDS_KEY = 'scrobbleforge_creds';
 const STORAGE_QUEUE_KEY = 'scrobbleforge_queue';
@@ -36,16 +38,28 @@ const DEFAULT_CREDS: LastFmCredentials = {
 };
 
 export default function App() {
+  const [connection, setConnection] = useState('connecting');
+  const [summary, setSummary] = useState<ActivitySummary | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [isSubmittingBatch, setIsSubmittingBatch] = useState(false);
+  const batchBusy = useRef(false);
+  const recentBusy = useRef(false);
   // Navigation / workspace tab
   const [activeNavTab, setActiveNavTab] = useState<
     'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant'
   >('stream');
+  const visitedTabs = useRef(new Set<string>(['stream']));
+  visitedTabs.current.add(activeNavTab);
 
   // Credentials & Auth
   const [credentials, setCredentials] = useState<LastFmCredentials>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_CREDS_KEY);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const old = JSON.parse(saved);
+        localStorage.removeItem(STORAGE_CREDS_KEY);
+        return { ...DEFAULT_CREDS, apiKey: old.apiKey || '', username: old.username || '' };
+      }
     } catch {}
     return DEFAULT_CREDS;
   });
@@ -59,7 +73,7 @@ export default function App() {
   const [queue, setQueue] = useState<QueueTrack[]>(() => {
     try {
       const savedQueue = localStorage.getItem(STORAGE_QUEUE_KEY);
-      if (savedQueue) return JSON.parse(savedQueue);
+      if (savedQueue) { const parsed = JSON.parse(savedQueue); if (Array.isArray(parsed) && parsed.every(t => typeof t?.name === 'string' && typeof t.artist === 'string')) return parsed.slice(0, 5000); }
     } catch {}
     return [];
   });
@@ -68,7 +82,7 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_QUEUE_KEY, JSON.stringify(queue));
-    } catch {}
+    } catch { setNotice('Queue could not be saved in this browser. Export it before leaving.'); }
   }, [queue]);
 
   // Idle session detection
@@ -142,11 +156,13 @@ export default function App() {
         if (data.ok) {
           const updatedCreds = {
             ...creds,
+            password: '',
+            username: data.username || creds.username,
             sessionKey: data.sessionKey,
           };
           setCredentials(updatedCreds);
           try {
-            localStorage.setItem(STORAGE_CREDS_KEY, JSON.stringify(updatedCreds));
+            localStorage.setItem(STORAGE_CREDS_KEY, JSON.stringify({ apiKey: updatedCreds.apiKey, username: updatedCreds.username }));
           } catch {}
 
           if (data.user) {
@@ -155,10 +171,9 @@ export default function App() {
           setIsConnected(true);
           return true;
         }
-        return false;
+        throw new Error(data.error || 'Last.fm authentication failed.');
       } catch (e) {
-        console.error('Auth error', e);
-        return false;
+        throw e instanceof Error ? e : new Error('Could not connect to Last.fm.');
       }
     },
     []
@@ -166,67 +181,71 @@ export default function App() {
 
   // Fetch user profile and playcount
   const fetchUserInfo = useCallback(async () => {
-    if (!credentials.apiKey || !credentials.username) return;
+    if (!isConnected || !credentials.username) return;
     setIsRefreshingUser(true);
     try {
       const res = await fetch(
-        `/api/lastfm/user-info?apiKey=${credentials.apiKey}&username=${credentials.username}`
+        `/api/lastfm/user-info?${new URLSearchParams({ username: credentials.username })}`
       );
       const data = await res.json();
       if (data.ok && data.user) {
         setUser(data.user);
-        setIsConnected(true);
-      }
-    } catch (e) {
-      console.error('Fetch user info error', e);
+      } else { setNotice(data.error || 'Could not refresh profile.'); }
+    } catch {
+      setNotice('Profile refresh failed. Check the connection and activity journal.');
     } finally {
       setIsRefreshingUser(false);
     }
-  }, [credentials.apiKey, credentials.username]);
+  }, [isConnected, credentials.username]);
 
   // Fetch recent scrobbles
   const fetchRecentTracks = useCallback(async () => {
-    if (!credentials.apiKey || !credentials.username) return;
+    if (!isConnected || !credentials.username) return;
+    if (recentBusy.current) return;
+    recentBusy.current = true;
     setIsLoadingTracks(true);
     try {
       const res = await fetch(
-        `/api/lastfm/recent-tracks?apiKey=${credentials.apiKey}&username=${credentials.username}&limit=60`
+        `/api/lastfm/recent-tracks?${new URLSearchParams({ username: credentials.username, limit: '60' })}`
       );
       const data = await res.json();
       if (data.ok && data.recentTracks) {
         setRecentTracks(Array.isArray(data.recentTracks) ? data.recentTracks : [data.recentTracks]);
-      }
-    } catch (e) {
-      console.error('Fetch recent tracks error', e);
+      } else { setNotice(data.error || 'Could not refresh recent tracks.'); }
+    } catch {
+      setNotice('Recent tracks refresh failed. Check the activity journal.');
     } finally {
+      recentBusy.current = false;
       setIsLoadingTracks(false);
     }
-  }, [credentials.apiKey, credentials.username]);
+  }, [isConnected, credentials.username]);
 
-  // Initial connect on load
+  useEffect(() => { if (isConnected) { void fetchRecentTracks(); void fetchUserInfo(); } }, [isConnected, fetchRecentTracks, fetchUserInfo]);
+
+  // Credentials intentionally do not survive reload in browser storage.
   useEffect(() => {
-    if (credentials.username && (credentials.apiKey || credentials.sessionKey)) {
-      authenticateLastFm(credentials).then((ok) => {
-        if (ok) {
-          fetchRecentTracks();
-        }
-      });
-    }
+    let busy = false;
+    const refresh = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const res = await fetch('/api/activity/summary');
+        if (!res.ok) throw new Error('Journal unavailable');
+        const data = await res.json();
+        setSummary(data.summary);
+      } catch { setSummary(null); }
+      finally { busy = false; }
+    };
+    void refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
   }, []);
-
-  // Poll recent tracks while job is active
-  useEffect(() => {
-    if (job.status === 'running') {
-      const interval = setInterval(() => {
-        fetchRecentTracks();
-      }, 10000);
-      return () => clearInterval(interval);
-    }
-  }, [job.status, fetchRecentTracks]);
 
   // SSE event stream listener
   useEffect(() => {
     const eventSource = new EventSource('/api/job/events');
+    eventSource.onopen = () => setConnection('live');
+    eventSource.onerror = () => setConnection('reconnecting');
 
     eventSource.addEventListener('status', (e) => {
       try {
@@ -234,7 +253,7 @@ export default function App() {
         setJob((prev) => ({
           ...prev,
           ...updated,
-          logs: updated.logs || prev.logs,
+          logs: [...new Map([...prev.logs, ...(updated.logs || [])].map(log => [log.id, log])).values()].sort((a, b) => (a.seq || 0) - (b.seq || 0)).slice(-500),
         }));
       } catch (err) {
         console.error('SSE parse status error', err);
@@ -245,7 +264,7 @@ export default function App() {
       try {
         const newLog = JSON.parse(e.data);
         setJob((prev) => {
-          const logs = [...prev.logs, newLog];
+          const logs = [...new Map([...prev.logs, newLog].map(log => [log.id, log])).values()];
           if (logs.length > 500) logs.shift();
           return {
             ...prev,
@@ -304,16 +323,10 @@ export default function App() {
       });
       const data = await res.json();
       if (!data.ok) {
-        alert(data.error || 'Failed to start job.');
-      } else {
-        // Record active time
-        setLastLiveTimestamp(Date.now());
-        try {
-          localStorage.setItem(STORAGE_IDLE_KEY, String(Date.now()));
-        } catch {}
+        setNotice(data.error || 'Failed to start job.');
       }
     } catch (e: any) {
-      alert(e.message || 'Error communicating with server.');
+      setNotice(e.message || 'Error communicating with server.');
     }
   };
 
@@ -345,115 +358,38 @@ export default function App() {
       });
       const data = await res.json();
       if (!data.ok) {
-        alert(data.error || 'Failed to start streaming queue.');
-      } else {
-        setLastLiveTimestamp(Date.now());
-        try {
-          localStorage.setItem(STORAGE_IDLE_KEY, String(Date.now()));
-        } catch {}
+        setNotice(data.error || 'Failed to start streaming queue.');
       }
     } catch (e: any) {
-      alert(e.message || 'Error starting queue stream.');
+      setNotice(e.message || 'Error starting queue stream.');
     }
   };
 
-  // Batch Historical Scrobble
-  const handleBatchScrobbleQueue = async (
-    tracksToScrobble: QueueTrack[],
-    spanHours: number
-  ): Promise<boolean> => {
-    if (!isConnected) {
-      setIsAuthModalOpen(true);
-      return false;
-    }
-    if (tracksToScrobble.length === 0) return false;
-
+  const submitBatch = async (payload: Record<string, unknown>): Promise<boolean> => {
+    if (!isConnected) { setIsAuthModalOpen(true); return false; }
+    if (batchBusy.current) { setNotice('A batch submission is already in progress.'); return false; }
+    batchBusy.current = true; setIsSubmittingBatch(true);
     try {
       const res = await fetch('/api/job/batch-scrobble-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tracks: tracksToScrobble,
-          spanHours,
-          apiKey: credentials.apiKey,
-          apiSecret: credentials.apiSecret,
-          sessionKey: credentials.sessionKey,
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, sessionKey: credentials.sessionKey }),
       });
       const data = await res.json();
-      if (data.ok) {
-        setTimeout(fetchRecentTracks, 1500);
-        setTimeout(fetchUserInfo, 2500);
-        return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
+      setNotice(`Batch result: ${data.completed || 0} accepted, ${data.ignored || 0} ignored.${data.error ? ` ${data.error}` : ''}`);
+      if (data.completed) { setLastLiveTimestamp(Date.now()); void fetchRecentTracks(); void fetchUserInfo(); }
+      return Boolean(data.ok);
+    } catch { setNotice('Batch connection lost. Check recorded results before resubmitting to avoid duplicates.'); return false; }
+    finally { batchBusy.current = false; setIsSubmittingBatch(false); }
   };
-
-  // Catch-Up Missing Tracks Handler
-  const handleCatchUpBatch = async (params: {
-    tracks: QueueTrack[];
-    startTime: number;
-    endTime: number;
-    resumeLive: boolean;
-  }): Promise<boolean> => {
-    if (!isConnected) {
-      setIsAuthModalOpen(true);
-      return false;
+  const handleBatchScrobbleQueue = (tracks: QueueTrack[], spanHours: number) => submitBatch({ tracks, spanHours });
+  const handleCatchUpBatch = async (params: { tracks: QueueTrack[]; startTime: number; endTime: number; resumeLive: boolean }): Promise<boolean> => {
+    const ok = await submitBatch({ tracks: params.tracks, startTime: params.startTime, endTime: params.endTime });
+    if (ok) {
+      setIsIdleDismissed(true);
+      if (params.resumeLive && job.status === 'paused') await handleResumeJob();
+      else if (params.resumeLive && queue.length) await handleStartStreamingQueue(queue, false);
     }
-
-    try {
-      const res = await fetch('/api/job/batch-scrobble-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tracks: params.tracks,
-          startTime: params.startTime,
-          endTime: params.endTime,
-          apiKey: credentials.apiKey,
-          apiSecret: credentials.apiSecret,
-          sessionKey: credentials.sessionKey,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.ok) {
-        // Reset idle timestamp to now
-        const now = Date.now();
-        setLastLiveTimestamp(now);
-        try {
-          localStorage.setItem(STORAGE_IDLE_KEY, String(now));
-        } catch {}
-        setIsIdleDismissed(true);
-
-        setTimeout(fetchRecentTracks, 1500);
-        setTimeout(fetchUserInfo, 2500);
-
-        // Resume live stream if requested
-        if (params.resumeLive) {
-          if (queue.length > 0) {
-            handleStartStreamingQueue(queue, true);
-          } else {
-            handleStartJob({
-              artist: job.artist,
-              track: job.track,
-              album: job.album,
-              limit: job.limit,
-              interval: job.interval,
-              jitter: job.jitter,
-              isDryRun: job.isDryRun,
-            });
-          }
-        }
-
-        return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
+    return ok;
   };
 
   // Simulate 1h idle gap for instantaneous demonstration & testing
@@ -469,7 +405,7 @@ export default function App() {
 
   // Queue manipulation handlers
   const handleAddTracksToQueue = (newTracks: QueueTrack[]) => {
-    setQueue((prev) => [...prev, ...newTracks]);
+    setQueue((prev) => [...prev, ...newTracks.map(track => ({ ...track, id: crypto.randomUUID() }))].slice(0, 5000));
     setActiveNavTab('queue');
   };
 
@@ -478,29 +414,25 @@ export default function App() {
   };
 
   const handleShuffleQueue = () => {
-    setQueue((prev) => [...prev].sort(() => Math.random() - 0.5));
+    setQueue(prev => { const next = [...prev]; for (let i = next.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [next[i], next[j]] = [next[j], next[i]]; } return next; });
   };
 
   const handleClearQueue = () => {
-    setQueue([]);
+    if (window.confirm('Clear the editable queue? The active job snapshot will not change.')) setQueue([]);
   };
 
-  const handlePauseJob = async () => {
-    await fetch('/api/job/pause', { method: 'POST' });
+  const jobAction = async (action: string) => {
+    try {
+      const response = await fetch(`/api/job/${action}`, { method: 'POST' });
+      const data = await response.json();
+      if (!data.ok) setNotice(data.error || 'Job action failed.');
+      if (data.job) setJob(prev => ({ ...prev, ...data.job, logs: prev.logs }));
+    } catch { setNotice('Could not reach the engine. Check connection status.'); }
   };
-
-  const handleResumeJob = async () => {
-    await fetch('/api/job/resume', { method: 'POST' });
-  };
-
-  const handleStopJob = async () => {
-    await fetch('/api/job/stop', { method: 'POST' });
-  };
-
-  const handleClearLogs = async () => {
-    await fetch('/api/job/clear-logs', { method: 'POST' });
-    setJob((prev) => ({ ...prev, logs: [] }));
-  };
+  const handlePauseJob = () => jobAction('pause');
+  const handleResumeJob = () => jobAction('resume');
+  const handleStopJob = () => jobAction('stop');
+  const handleClearLogs = () => { void jobAction('clear-logs'); };
 
   // Instant Single Scrobble
   const handleSingleScrobble = async (
@@ -527,8 +459,10 @@ export default function App() {
         setTimeout(fetchRecentTracks, 1000);
         return true;
       }
+      setNotice(data.error || 'Last.fm rejected the operation.');
       return false;
     } catch {
+      setNotice('Connection lost. Check recorded results before trying again.');
       return false;
     }
   };
@@ -557,14 +491,20 @@ export default function App() {
         setTimeout(fetchRecentTracks, 800);
         return true;
       }
+      setNotice(data.error || 'Last.fm rejected the operation.');
       return false;
     } catch {
+      setNotice('Connection lost. Check recorded results before trying again.');
       return false;
     }
   };
 
-  const handleDisconnect = () => {
-    localStorage.removeItem(STORAGE_CREDS_KEY);
+  const handleDisconnect = async () => {
+    try {
+      const response = await fetch('/api/lastfm/disconnect', { method: 'POST' });
+      if (!response.ok) throw new Error();
+    } catch { setNotice('Server disconnect failed. The worker may still be active.'); return; }
+    try { localStorage.removeItem(STORAGE_CREDS_KEY); } catch { setNotice('Could not clear saved account hints in this browser.'); }
     setCredentials({
       apiKey: '',
       apiSecret: '',
@@ -572,6 +512,7 @@ export default function App() {
       password: '',
       sessionKey: '',
     });
+    setRecentTracks([]);
     setUser(null);
     setIsConnected(false);
     setIsAuthModalOpen(false);
@@ -593,41 +534,17 @@ export default function App() {
 
       {/* Main Studio Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        {/* Banner */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-r from-zinc-900 via-zinc-900 to-zinc-950 p-6 rounded-2xl border border-zinc-800 shadow-xl">
-          <div className="space-y-1">
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center space-x-2">
-              <span>Universal Last.fm Scrobbler Studio</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-red-950/80 border border-red-800/60 text-red-400 font-mono font-medium">
-                Live Engine
-              </span>
-            </h1>
-            <p className="text-xs sm:text-sm text-zinc-400 max-w-2xl leading-relaxed">
-              Universal search for users, artists, and albums · Automatic &gt;1h idle detection with 1-click catch-up backfilling · Continuous live streaming and batch historical scrobbler.
-            </p>
-          </div>
-
-          <div className="flex items-center space-x-2 shrink-0">
-            {/* Quick Simulate 1h Idle trigger */}
-            <button
-              onClick={handleSimulateIdle}
-              className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium rounded-xl border border-zinc-700 transition-colors"
-              title="Test the 1h Idle Detection and Catch-up banner immediately"
-            >
-              Simulate 1h Idle
-            </button>
-
-            {!isConnected && (
-              <button
-                onClick={() => setIsAuthModalOpen(true)}
-                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-medium text-xs rounded-xl shadow-lg shadow-red-950/60 transition-all flex items-center space-x-2"
-              >
-                <Radio className="w-4 h-4 animate-pulse" />
-                <span>Connect Account</span>
-              </button>
-            )}
-          </div>
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-5 pb-2">
+          <div><div className="text-[10px] uppercase tracking-[.24em] text-red-400 font-semibold mb-3">Your listening workspace</div><h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">Less guessing.<br className="sm:hidden" /> More listening.</h1><p className="text-sm text-zinc-400 mt-3 max-w-xl leading-relaxed">Discover music, organize your queue, and track every Last.fm submission in one place.</p></div>
+          <div className="flex gap-3 items-center shrink-0"><a href="https://www.last.fm" target="_blank" rel="noreferrer" className="secondary-button text-xs flex items-center gap-2">Open Last.fm<ArrowUpRight size={14} /></a>{!isConnected && <button onClick={() => setIsAuthModalOpen(true)} className="px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded-xl">Connect account</button>}</div>
         </div>
+        <ActivityOverview summary={summary} job={job} connection={connection} />
+        {notice && <div role="status" className="studio-panel p-4 flex items-start justify-between gap-3 text-sm text-zinc-300"><div className="flex gap-3"><Info size={18} className="text-red-400 shrink-0 mt-0.5" /><span>{notice}</span></div><button aria-label="Dismiss notification" className="icon-button shrink-0" onClick={() => setNotice(null)}><X size={14} /></button></div>}
+        {['running', 'paused', 'rate_limited', 'error'].includes(job.status) && <div className="studio-panel p-4 flex flex-wrap items-center justify-between gap-3"><div className="text-xs"><span className="text-zinc-200 font-semibold">{job.queueMode === 'single_loop' ? `${job.artist} — ${job.track}` : `Queue session · ${job.queue.length} tracks`}</span><p className="mt-1 text-zinc-500">{job.scrobblesCompleted} accepted · {job.ignoredCount || 0} ignored · {job.simulatedCount || 0} simulated · {job.status.replace('_', ' ')}</p></div><div className="flex gap-2">{['running', 'rate_limited'].includes(job.status) && <button className="secondary-button text-xs" onClick={handlePauseJob}>Pause</button>}{job.status === 'paused' && <button className="secondary-button text-xs" onClick={handleResumeJob}>Resume</button>}<button className="secondary-button text-xs text-rose-300" onClick={handleStopJob}>Stop session</button></div></div>}
+        {isSubmittingBatch && <div role="status" className="studio-panel p-4 flex flex-wrap justify-between gap-3 items-center text-xs"><span className="text-zinc-300">Batch in progress. Confirmed chunk results appear in the journal.</span><button className="secondary-button" onClick={() => void jobAction('cancel-batch')}>Cancel remaining chunks</button></div>}
+        <nav aria-label="Workspace" className="workspace-tabs flex overflow-x-auto gap-1.5 border-b border-zinc-800 pb-3">
+          {([{ id: 'stream', label: 'Live engine', icon: Radio }, { id: 'search', label: 'Discover', icon: Search }, { id: 'harvester', label: 'Import profile', icon: Users }, { id: 'artist', label: 'Catalog', icon: Disc }, { id: 'queue', label: 'Queue', icon: ListMusic }, { id: 'instant', label: 'Instant actions', icon: Zap }] as const).map(({ id, label, icon: Icon }) => <button key={id} aria-current={activeNavTab === id ? 'page' : undefined} onClick={() => setActiveNavTab(id)} className={`flex items-center gap-2 shrink-0 px-4 py-2.5 rounded-xl text-xs font-medium ${activeNavTab === id ? 'bg-red-500/10 text-red-300 border border-red-500/25' : 'text-zinc-400 hover:bg-zinc-900 border border-transparent'}`}><Icon size={15} />{label}{id === 'queue' && <span className="text-[10px] rounded-full bg-zinc-800 px-1.5 py-0.5">{queue.length}</span>}</button>)}
+        </nav>
 
         {/* CATCH-UP BANNER: Displays when live session has been idle for >= 1 hour */}
         {isIdleOverOneHour && !isIdleDismissed && (
@@ -641,7 +558,7 @@ export default function App() {
               track: job.track,
               album: job.album,
             }}
-            isJobRunning={job.status === 'running'}
+            isJobRunning={['running', 'rate_limited', 'paused'].includes(job.status)}
             onCatchUpBatch={handleCatchUpBatch}
             onDismiss={() => setIsIdleDismissed(true)}
             onSimulateIdle={handleSimulateIdle}
@@ -649,11 +566,11 @@ export default function App() {
         )}
 
         {/* 2-Column Responsive Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left Column: Interactive Mode & Workspace (7 cols) */}
-          <div className="lg:col-span-7 space-y-8">
+          <div className="lg:col-span-8 space-y-6">
             {/* Primary Engine Controls & Mode Tab Navigation */}
-            <ScrobblerEngine
+            <div hidden={activeNavTab !== 'stream' && activeNavTab !== 'instant'}><ScrobblerEngine
               job={job}
               credentials={credentials}
               isConnected={isConnected}
@@ -667,19 +584,22 @@ export default function App() {
               onSingleScrobble={handleSingleScrobble}
               onUpdateNowPlaying={handleUpdateNowPlaying}
               onOpenAuth={() => setIsAuthModalOpen(true)}
-            />
+            /></div>
 
             {/* Sub-panels based on active tab */}
-            {activeNavTab === 'search' && (
+            {visitedTabs.current.has('search') && (
+              <div hidden={activeNavTab !== 'search'}>
               <UniversalSearchExplorer
                 apiKey={credentials.apiKey}
                 onAddTracksToQueue={handleAddTracksToQueue}
                 onInstantBatchScrobble={handleBatchScrobbleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
               />
+              </div>
             )}
 
-            {activeNavTab === 'harvester' && (
+            {visitedTabs.current.has('harvester') && (
+              <div hidden={activeNavTab !== 'harvester'}>
               <ProfileHarvester
                 apiKey={credentials.apiKey}
                 defaultUsername={credentials.username}
@@ -687,72 +607,58 @@ export default function App() {
                 onInstantBatchScrobble={handleBatchScrobbleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
               />
+              </div>
             )}
 
-            {activeNavTab === 'artist' && (
+            {visitedTabs.current.has('artist') && (
+              <div hidden={activeNavTab !== 'artist'}>
               <ArtistCatalogExplorer
                 apiKey={credentials.apiKey}
                 onAddTracksToQueue={handleAddTracksToQueue}
                 onInstantBatchScrobble={handleBatchScrobbleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
               />
+              </div>
             )}
 
-            {activeNavTab === 'queue' && (
+            {visitedTabs.current.has('queue') && (
+              <div hidden={activeNavTab !== 'queue'}>
               <ActiveQueueManager
                 queue={queue}
-                currentTrackIndex={job.currentQueueIndex}
-                isStreaming={job.status === 'running'}
+                currentTrackId={job.queueMode !== 'single_loop' ? job.queue[job.currentQueueIndex]?.id : undefined}
+                isStreaming={['running', 'paused', 'rate_limited'].includes(job.status)}
+                onReorder={(id, direction) => setQueue(prev => { const next = [...prev]; const index = next.findIndex(track => track.id === id); const target = index + direction; if (target >= 0 && target < next.length) [next[index], next[target]] = [next[target], next[index]]; return next; })}
+                onImport={handleAddTracksToQueue}
                 onClearQueue={handleClearQueue}
                 onRemoveTrack={handleRemoveTrack}
                 onShuffleQueue={handleShuffleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
                 onBatchScrobbleQueue={handleBatchScrobbleQueue}
               />
+              </div>
             )}
 
             {/* Live Terminal Console */}
-            <LiveConsole job={job} onClearLogs={handleClearLogs} />
+            <LiveConsole job={job} onClearLogs={handleClearLogs} connection={connection} cooldownResumeAt={summary?.cooldownResumeAt} />
           </div>
 
           {/* Right Column: Live Feed & Info (5 cols) */}
-          <div className="lg:col-span-5 space-y-6">
-            <RecentScrobblesFeed
+          <div className="lg:col-span-4 space-y-6">
+            <Suspense fallback={<div className="studio-panel p-6 text-xs text-zinc-500">Loading recent listening…</div>}><RecentScrobblesFeed
               recentTracks={recentTracks}
               totalScrobbles={user?.playcount || '0'}
               isLoading={isLoadingTracks}
               onRefresh={fetchRecentTracks}
-              username={credentials.username}
-            />
+              username={isConnected ? credentials.username : ''}
+              enabled={isConnected && !(summary?.cooldownResumeAt && summary.cooldownResumeAt > Date.now())}
+            /></Suspense>
 
-            {/* Documentation & Safeguards */}
-            <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-5 text-xs text-zinc-400 space-y-3">
-              <div className="flex items-center space-x-2 text-zinc-200 font-semibold">
-                <Info className="w-4 h-4 text-red-500" />
-                <span>Features & Operating Modes</span>
-              </div>
-              <ul className="space-y-2 list-disc list-inside text-[11px] leading-relaxed">
-                <li>
-                  <strong className="text-zinc-300">Idle &gt; 1h Catch-up:</strong>{' '}
-                  Detects when your Live session has been idle for more than an hour and suggests auto-filling the gap using recent playback history.
-                </li>
-                <li>
-                  <strong className="text-zinc-300">Universal Search:</strong>{' '}
-                  Search any user profile, artist, album, or song on Last.fm and scrobble from them with one click.
-                </li>
-                <li>
-                  <strong className="text-zinc-300">Profile Harvester:</strong>{' '}
-                  Crawl up to 500 recent songs, top tracks, or loved songs from any user profile.
-                </li>
-                <li>
-                  <strong className="text-zinc-300">Artist & Album Discography:</strong>{' '}
-                  Load top tracks or full albums with authentic chronological track sequencing and durations.
-                </li>
-                <li>
-                  <strong className="text-zinc-300">Rate Limit Auto-Recovery:</strong>{' '}
-                  Handles Last.fm Code 26 with a 60-second cooldown timer and resumes automatically.
-                </li>
-              </ul>
+            <div className="studio-panel p-5 space-y-4">
+              <div className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck size={16} className="text-red-400" />Built for visibility</div>
+              <p className="text-xs text-zinc-400 leading-relaxed">Only confirmed accepted tracks count as scrobbles. Ignored tracks and dry runs stay separate.</p>
+              <div className="border-t border-zinc-800 pt-4 text-xs text-zinc-500 leading-relaxed">Rate limits are recorded across all API calls. During cooldowns, requests are deferred—not silently submitted.</div>
+              <p className="text-[11px] text-zinc-500">Single-operator workspace. Keep this server behind trusted access; it is not a multi-user service.</p>
+              <details className="text-xs text-zinc-500"><summary className="cursor-pointer">Developer tools</summary><button onClick={handleSimulateIdle} className="secondary-button mt-3 text-xs">Simulate idle gap (not playback)</button></details>
             </div>
           </div>
         </div>
@@ -760,7 +666,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-900 py-6 text-center text-xs text-zinc-500 font-mono">
-        <p>ScrobbleForge Studio · Real-time Last.fm Web Services 2.0 Integration</p>
+        <p>ScrobbleForge · Your music. Your history. No silent failures.</p>
       </footer>
 
       {/* Auth Modal */}

@@ -63,6 +63,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
   const [jitter, setJitter] = useState(job.jitter ?? true);
   const [isDryRun, setIsDryRun] = useState(job.isDryRun ?? false);
 
+  const [busyAction, setBusyAction] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -114,7 +115,8 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
   };
 
   const handleSearchTrack = async () => {
-    if (!searchQuery.trim() || !credentials.apiKey) return;
+    if (!searchQuery.trim()) return;
+    if (!credentials.apiKey) { setActionFeedback('Connect Last.fm to search the catalog.'); return; }
     setIsSearching(true);
     try {
       const res = await fetch(
@@ -123,9 +125,9 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
       const data = await res.json();
       if (data.ok && data.tracks) {
         setSearchResults(Array.isArray(data.tracks) ? data.tracks : [data.tracks]);
-      }
+      } else { setSearchResults([]); setActionFeedback(data.error || 'No matching tracks found.'); }
     } catch {
-      // Ignore
+      setActionFeedback('Search failed. Check the activity journal.');
     } finally {
       setIsSearching(false);
     }
@@ -144,6 +146,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
       onOpenAuth();
       return;
     }
+    if (busyAction) return; setBusyAction(true);
     await onStartJob({
       artist: artist.trim(),
       track: track.trim(),
@@ -153,6 +156,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
       jitter,
       isDryRun,
     });
+    setBusyAction(false);
   };
 
   const handleInstantScrobble = async () => {
@@ -160,14 +164,16 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
       onOpenAuth();
       return;
     }
+    if (busyAction) return; setBusyAction(true);
     setActionFeedback('Submitting single test scrobble...');
     const ok = await onSingleScrobble(artist, track, album);
     if (ok) {
       setActionFeedback('✅ 1 scrobble registered on Last.fm successfully!');
     } else {
-      setActionFeedback('❌ Failed to scrobble track. Check credentials.');
+      setActionFeedback('Track was not confirmed accepted. See the activity journal for details.');
     }
-    setTimeout(() => setActionFeedback(null), 3000);
+    setBusyAction(false);
+    setTimeout(() => setActionFeedback(null), 6000);
   };
 
   const handleNowPlaying = async () => {
@@ -175,6 +181,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
       onOpenAuth();
       return;
     }
+    if (busyAction) return; setBusyAction(true);
     setActionFeedback('Updating "Now Playing" on Last.fm...');
     const ok = await onUpdateNowPlaying(artist, track, album);
     if (ok) {
@@ -182,126 +189,15 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
     } else {
       setActionFeedback('❌ Failed to update status.');
     }
-    setTimeout(() => setActionFeedback(null), 3000);
+    setBusyAction(false);
+    setTimeout(() => setActionFeedback(null), 6000);
   };
 
-  const isJobActive = job.status === 'running' || job.status === 'rate_limited';
+  const isJobActive = ['running', 'rate_limited', 'paused'].includes(job.status);
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden flex flex-col">
-      {/* Navigation Bar */}
-      <div className="px-6 pt-4 pb-2 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-3 bg-zinc-950/40">
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-zinc-950 rounded-xl border border-zinc-800">
-          <button
-            onClick={() => onChangeNavTab('stream')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'stream'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Radio className="w-3.5 h-3.5" />
-            <span>Single Loop</span>
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('search')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'search'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Search className="w-3.5 h-3.5" />
-            <span>Search & Scrobble</span>
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('harvester')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'harvester'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>Profile Harvester</span>
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('artist')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'artist'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Disc className="w-3.5 h-3.5" />
-            <span>Artist & Albums</span>
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('queue')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all relative ${
-              activeNavTab === 'queue'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <ListMusic className="w-3.5 h-3.5" />
-            <span>Queue</span>
-            {queueCount > 0 && (
-              <span className="text-[10px] font-mono bg-red-950 text-red-300 px-1.5 py-0.2 rounded-full border border-red-800 ml-1">
-                {queueCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => onChangeNavTab('instant')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              activeNavTab === 'instant'
-                ? 'bg-red-600 text-white shadow-md shadow-red-950/50'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span>Instant</span>
-          </button>
-        </div>
-
-        {/* Global Status badge */}
-        <div className="flex items-center space-x-2">
-          {job.status === 'running' && (
-            <span className="flex items-center space-x-1.5 text-xs font-mono text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-800/50">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-              <span>ACTIVE</span>
-            </span>
-          )}
-          {job.status === 'rate_limited' && (
-            <span className="flex items-center space-x-1.5 text-xs font-mono text-amber-400 bg-amber-950/60 px-2.5 py-1 rounded-full border border-amber-800/50">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span>RATE LIMITED (60s)</span>
-            </span>
-          )}
-          {job.status === 'paused' && (
-            <span className="text-xs font-mono text-yellow-400 bg-yellow-950/50 px-2.5 py-1 rounded-full border border-yellow-800/50">
-              PAUSED
-            </span>
-          )}
-          {job.status === 'completed' && (
-            <span className="text-xs font-mono text-cyan-400 bg-cyan-950/50 px-2.5 py-1 rounded-full border border-cyan-800/50">
-              COMPLETED
-            </span>
-          )}
-          {job.status === 'idle' && (
-            <span className="text-xs font-mono text-zinc-500 bg-zinc-800/60 px-2.5 py-1 rounded-full border border-zinc-700/50">
-              IDLE
-            </span>
-          )}
-        </div>
-      </div>
-
+    <div className="studio-panel overflow-hidden flex flex-col">
+      <div className="p-5 border-b border-zinc-800/70 flex items-center justify-between gap-3"><div><h2 className="text-sm font-semibold">{activeNavTab === 'instant' ? 'Instant actions' : 'Live scrobble engine'}</h2><p className="text-xs text-zinc-500 mt-1">{activeNavTab === 'instant' ? 'Submit one track or update your profile status.' : 'Configure a session. Follow every result in the journal.'}</p></div><span className={`text-[10px] uppercase tracking-wider px-2.5 py-1.5 rounded-lg border ${job.status === 'error' ? 'text-rose-400 border-rose-500/20 bg-rose-500/10' : job.status === 'rate_limited' ? 'text-amber-400 border-amber-500/20 bg-amber-500/10' : 'text-zinc-400 border-zinc-700 bg-zinc-800/50'}`}>{job.status.replace('_', ' ')}</span></div>
       {/* Main Single Track Stream Config Body */}
       {activeNavTab === 'stream' && (
         <div className="p-6 space-y-6">
@@ -318,6 +214,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 <button
                   key={idx}
                   type="button"
+                  disabled={isJobActive}
                   onClick={() => handleApplyPreset(p)}
                   className="text-xs px-2.5 py-1 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition-colors"
                 >
@@ -334,6 +231,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
                 <input
                   type="text"
+                  aria-label="Find a track"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSearchTrack()}
@@ -378,6 +276,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 <input
                   type="text"
                   disabled={isJobActive}
+                  aria-label="Artist name"
                   value={artist}
                   onChange={(e) => setArtist(e.target.value)}
                   placeholder="e.g. rvaia"
@@ -392,6 +291,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 <input
                   type="text"
                   disabled={isJobActive}
+                  aria-label="Track title"
                   value={track}
                   onChange={(e) => setTrack(e.target.value)}
                   placeholder="e.g. kill bill"
@@ -406,6 +306,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 <input
                   type="text"
                   disabled={isJobActive}
+                  aria-label="Album"
                   value={album}
                   onChange={(e) => setAlbum(e.target.value)}
                   placeholder="e.g. kill bill"
@@ -431,8 +332,9 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 min="1"
                 max="50000"
                 disabled={isJobActive}
-                value={limit}
-                onChange={(e) => setLimit(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                aria-label="Target scrobble limit"
+                  value={limit}
+                onChange={(e) => setLimit(Math.min(50000, Math.max(1, parseInt(e.target.value, 10) || 1)))}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-zinc-100 focus:outline-none focus:border-red-500 disabled:opacity-60"
               />
             </div>
@@ -450,10 +352,11 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                 type="number"
                 step="0.5"
                 min="0.5"
-                max="60"
+                max="3600"
                 disabled={isJobActive}
-                value={interval}
-                onChange={(e) => setInterval(Math.max(0.5, parseFloat(e.target.value) || 1))}
+                aria-label="Pacing interval seconds"
+                  value={interval}
+                onChange={(e) => setInterval(Math.min(3600, Math.max(0.5, parseFloat(e.target.value) || 1)))}
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-zinc-100 focus:outline-none focus:border-red-500 disabled:opacity-60"
               />
             </div>
@@ -473,7 +376,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
                   Random Jitter (±0.5s)
                 </span>
                 <span className="text-[11px] text-zinc-500 block">
-                  Prevents uniform bot flags by staggering request times.
+                  Varies spacing slightly; never bypasses Last.fm limits.
                 </span>
               </div>
             </label>
@@ -502,6 +405,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
             {job.status === 'idle' || job.status === 'completed' || job.status === 'error' ? (
               <button
                 type="button"
+                disabled={busyAction || !artist.trim() || !track.trim()}
                 onClick={handleStart}
                 className="flex-1 sm:flex-initial flex items-center justify-center space-x-2 px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white font-medium text-xs rounded-xl shadow-lg shadow-red-950/60 transition-all hover:scale-[1.02]"
               >
@@ -510,7 +414,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
               </button>
             ) : null}
 
-            {job.status === 'running' && (
+            {(job.status === 'running' || job.status === 'rate_limited') && (
               <button
                 type="button"
                 onClick={onPauseJob}
@@ -560,6 +464,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
               <button
                 type="button"
                 onClick={handleInstantScrobble}
+                disabled={busyAction || isJobActive}
                 className="mt-4 flex items-center justify-center space-x-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium rounded-xl border border-zinc-700 transition-colors"
               >
                 <Zap className="w-3.5 h-3.5 text-yellow-400" />
@@ -577,6 +482,7 @@ export const ScrobblerEngine: React.FC<ScrobblerEngineProps> = ({
               <button
                 type="button"
                 onClick={handleNowPlaying}
+                disabled={busyAction || isJobActive}
                 className="mt-4 flex items-center justify-center space-x-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium rounded-xl border border-zinc-700 transition-colors"
               >
                 <Radio className="w-3.5 h-3.5 text-red-500 animate-pulse" />

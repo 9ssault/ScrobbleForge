@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Disc,
   Music,
@@ -27,6 +27,10 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
   onInstantBatchScrobble,
   onStartStreamingQueue,
 }) => {
+  const albumRequest = useRef(0);
+  const searchRequest = useRef(0);
+  const [loadedArtist, setLoadedArtist] = useState('');
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [artistQuery, setArtistQuery] = useState('rvaia');
   const [activeTab, setActiveTab] = useState<'tracks' | 'albums'>('tracks');
   const [isLoading, setIsLoading] = useState(false);
@@ -43,9 +47,12 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
 
   const handleSearchArtist = async (targetArtist?: string) => {
     const artist = (targetArtist || artistQuery).trim();
-    if (!artist || !apiKey) return;
+    if (!artist) return;
+    if (!apiKey) { setStatusMessage('Connect Last.fm before exploring a catalog.'); return; }
+    const request = ++searchRequest.current; ++albumRequest.current;
     setIsLoading(true);
     setStatusMessage(null);
+    setArtistTracks([]); setArtistAlbums([]); setLoadedArtist(artist);
     setSelectedAlbumName(null);
     setAlbumTracklist([]);
 
@@ -55,6 +62,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
         `/api/lastfm/fetch-artist-tracks?artist=${encodeURIComponent(artist)}&limit=60&apiKey=${apiKey}`
       );
       const tracksData = await tracksRes.json();
+      if (request !== searchRequest.current) return;
       if (tracksData.ok && tracksData.tracks) {
         setArtistTracks(tracksData.tracks);
       }
@@ -64,32 +72,37 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
         `/api/lastfm/fetch-artist-albums?artist=${encodeURIComponent(artist)}&limit=24&apiKey=${apiKey}`
       );
       const albumsData = await albumsRes.json();
+      if (request !== searchRequest.current) return;
       if (albumsData.ok && albumsData.albums) {
         setArtistAlbums(albumsData.albums);
       }
 
+      if (!tracksData.ok || !albumsData.ok) { setStatusMessage(tracksData.error || albumsData.error || 'Some catalog results could not be loaded.'); return; }
       setStatusMessage(
         `Loaded artist catalog for "${artist}": ${tracksData.tracks?.length || 0} top tracks & ${albumsData.albums?.length || 0} albums.`
       );
     } catch (e: any) {
-      setStatusMessage(`Error fetching artist: ${e.message}`);
+      if (request === searchRequest.current) setStatusMessage(`Error fetching artist: ${e.message}`);
     } finally {
-      setIsLoading(false);
+      if (request === searchRequest.current) setIsLoading(false);
     }
   };
 
   const handleSelectAlbum = async (albumName: string) => {
-    if (!artistQuery.trim() || !apiKey) return;
+    if (!loadedArtist || !apiKey) return;
+    setAlbumTracklist([]); setAlbumArt(null);
+    const request = ++albumRequest.current;
     setSelectedAlbumName(albumName);
     setIsLoadingAlbum(true);
 
     try {
       const res = await fetch(
         `/api/lastfm/fetch-album-tracks?artist=${encodeURIComponent(
-          artistQuery.trim()
+          loadedArtist
         )}&album=${encodeURIComponent(albumName)}&apiKey=${apiKey}`
       );
       const data = await res.json();
+      if (request !== albumRequest.current) return;
       if (data.ok && data.tracks) {
         setAlbumTracklist(data.tracks);
         setAlbumArt(data.image || null);
@@ -100,16 +113,19 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
         setStatusMessage(`Could not load album tracklist: ${data.error}`);
       }
     } catch (e: any) {
-      setStatusMessage(`Error loading album: ${e.message}`);
+      if (request === albumRequest.current) setStatusMessage(`Error loading album: ${e.message}`);
     } finally {
-      setIsLoadingAlbum(false);
+      if (request === albumRequest.current) setIsLoadingAlbum(false);
     }
   };
 
   const handleScrobbleAllArtistTracks = async () => {
     if (artistTracks.length === 0) return;
+    if (batchSubmitting) return; setBatchSubmitting(true);
     setStatusMessage(`Submitting all ${artistTracks.length} tracks for ${artistQuery}...`);
     const ok = await onInstantBatchScrobble(artistTracks, 24);
+    setBatchSubmitting(false);
+    if (!ok) setStatusMessage('Batch was not fully accepted. See the activity journal.');
     if (ok) {
       setStatusMessage(`🎉 Successfully scrobbled all ${artistTracks.length} tracks!`);
     }
@@ -117,15 +133,18 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
 
   const handleScrobbleFullAlbum = async () => {
     if (albumTracklist.length === 0) return;
+    if (batchSubmitting) return; setBatchSubmitting(true);
     setStatusMessage(`Submitting full album "${selectedAlbumName}" (${albumTracklist.length} tracks)...`);
     const ok = await onInstantBatchScrobble(albumTracklist, 2);
+    setBatchSubmitting(false);
+    if (!ok) setStatusMessage('Batch was not fully accepted. See the activity journal.');
     if (ok) {
       setStatusMessage(`🎉 Successfully scrobbled full album "${selectedAlbumName}"!`);
     }
   };
 
   return (
-    <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden p-6 space-y-6">
+    <div className="studio-panel overflow-hidden p-6 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-zinc-800">
         <div>
@@ -146,6 +165,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-500" />
           <input
+            aria-label="Artist name to explore"
             type="text"
             value={artistQuery}
             onChange={(e) => setArtistQuery(e.target.value)}
@@ -172,7 +192,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
       )}
 
       {/* Tabs: Artist Top Tracks vs Top Albums */}
-      <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+      <div className="flex flex-wrap gap-3 items-center justify-between border-b border-zinc-800 pb-2">
         <div className="flex space-x-1 p-1 bg-zinc-950 rounded-xl border border-zinc-800">
           <button
             type="button"
@@ -207,6 +227,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
               + Queue All Top Tracks
             </button>
             <button
+              disabled={batchSubmitting}
               onClick={handleScrobbleAllArtistTracks}
               className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-medium rounded-lg shadow-md transition-colors"
             >
@@ -283,7 +304,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
       {/* Tab Content: Albums Grid */}
       {activeTab === 'albums' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 max-h-72 overflow-y-auto pr-1">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-3 gap-3 max-h-72 overflow-y-auto pr-1">
             {artistAlbums.length === 0 ? (
               <div className="col-span-full py-12 text-center text-zinc-500 text-xs italic">
                 Search for an artist above to browse discography.
@@ -292,6 +313,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
               artistAlbums.map((album, idx) => (
                 <div
                   key={idx}
+                  role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void handleSelectAlbum(album.name); } }}
                   onClick={() => handleSelectAlbum(album.name)}
                   className={`p-2.5 rounded-xl border cursor-pointer transition-all flex flex-col group ${
                     selectedAlbumName === album.name
@@ -350,6 +372,7 @@ export const ArtistCatalogExplorer: React.FC<ArtistCatalogExplorerProps> = ({
                     + Add Album to Queue
                   </button>
                   <button
+                    disabled={batchSubmitting || isLoadingAlbum || !albumTracklist.length}
                     onClick={handleScrobbleFullAlbum}
                     className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-medium rounded-lg shadow-md transition-colors flex items-center space-x-1.5"
                   >
