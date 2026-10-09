@@ -1,10 +1,13 @@
 // Loaded only in isolated regression-test children. No live Last.fm calls are made.
+import { appendFileSync } from 'node:fs';
 const realFetch = globalThis.fetch;
+const callLog = process.env.LASTFM_CALL_LOG;
 let cooldownAttempts = 0;
 globalThis.fetch = async (input, init) => {
   const url = String(input);
   if (!url.startsWith('https://ws.audioscrobbler.com/2.0/')) return realFetch(input, init);
   const params = init?.method === 'POST' ? new URLSearchParams(init.body) : new URL(url).searchParams;
+  if (callLog) { try { appendFileSync(callLog, `${init?.method || 'GET'} ${params.get('method')}\n`); } catch { /* test aid only */ } }
   const method = params.get('method');
   const track = params.get('track[0]') || params.get('track') || params.get('artist') || '';
   const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', ...headers } });

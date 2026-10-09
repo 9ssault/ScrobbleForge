@@ -14,14 +14,14 @@ import {
   Disc,
   ListMusic,
 } from 'lucide-react';
-import { JobState, LastFmCredentials, QueueTrack } from '../types';
+import { JobState, LastFmCredentials, NavTab, QueueTrack } from '../types';
 
 interface ScrobblerEngineProps {
   job: JobState;
   credentials: LastFmCredentials;
   isConnected: boolean;
-  activeNavTab: 'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant';
-  onChangeNavTab: (tab: 'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant') => void;
+  activeNavTab: NavTab;
+  onChangeNavTab: (tab: NavTab) => void;
   queueCount: number;
   onStartJob: (params: {
     artist: string;

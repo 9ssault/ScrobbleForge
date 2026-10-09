@@ -47,11 +47,11 @@ export interface ScrobbleLog {
   album?: string;
   count?: number;
   total?: number;
-  category?: 'api' | 'job' | 'auth' | 'system';
+  category?: 'api' | 'job' | 'auth' | 'system' | 'player';
   operation?: string;
   jobId?: string;
   requestId?: string;
-  outcome?: 'attempt' | 'accepted' | 'ignored' | 'failed' | 'rate_limited' | 'success' | 'simulated' | 'uncertain' | 'deferred';
+  outcome?: 'attempt' | 'accepted' | 'ignored' | 'failed' | 'rate_limited' | 'success' | 'simulated' | 'uncertain' | 'deferred' | 'played';
   httpStatus?: number;
   errorCode?: number;
   durationMs?: number;
@@ -70,6 +70,7 @@ export interface ActivitySummary {
   rateLimitHits: number;
   requests: number;
   simulated: number;
+  played: number;
   uncertainRequests: number;
   retentionDays: number;
   healthy: boolean;
@@ -77,6 +78,30 @@ export interface ActivitySummary {
   oldestAt: number | null;
   latestAt: number | null;
 }
+
+// AutoPlayer: real-time local playback simulation. It runs on wall-clock time only,
+// needs no credentials and makes no Last.fm API calls, while every completed play is
+// journaled locally with category 'player' and outcome 'played'.
+export interface PlayerState {
+  apiFree: true;
+  sessionId: string | null;
+  status: 'idle' | 'playing' | 'paused' | 'completed';
+  queue: QueueTrack[];
+  currentIndex: number;
+  activeTrack: QueueTrack | null;
+  trackDurationSeconds: number;
+  remainingMs: number;
+  loopQueue: boolean;
+  shuffle: boolean;
+  playsCompleted: number;
+  trackStartedAt: number | null;
+  trackEndsAt: number | null;
+  lastPlayAt: number | null;
+  startedAt: number | null;
+  stoppedReason: string | null;
+}
+
+export type NavTab = 'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant' | 'player';
 
 export interface IdleGapInfo {
   lastActiveTime: number;

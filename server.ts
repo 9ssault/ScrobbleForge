@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { recordActivity, readActivity, activitySummary, exportActivity, saveCheckpoint, loadCheckpoint } from './activity';
-import type { JobState, QueueTrack, ScrobbleLog } from './src/types';
+import type { JobState, PlayerState, QueueTrack, ScrobbleLog } from './src/types';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -363,6 +363,100 @@ function scheduleNextStep() {
   jobTimeoutHandle = setTimeout(() => {
     executeScrobbleStep();
   }, delay);
+}
+
+// ---------------------------------------------------------------------------
+// AutoPlayer — real-time local playback simulation.
+// This mode contains no Last.fm API calls: it needs no credentials, performs no
+// metadata lookups, submits no scrobbles and ignores cooldowns/limits. It simply
+// advances a queue on a wall-clock schedule while every completed play is journaled
+// locally (category 'player', outcome 'played').
+// ---------------------------------------------------------------------------
+const autoplayer: PlayerState = {
+  apiFree: true, sessionId: null, status: 'idle', queue: [], currentIndex: 0, activeTrack: null,
+  trackDurationSeconds: 30, remainingMs: 0, loopQueue: true, shuffle: false, playsCompleted: 0,
+  trackStartedAt: null, trackEndsAt: null, lastPlayAt: null, startedAt: null, stoppedReason: null,
+};
+let playerTimeoutHandle: NodeJS.Timeout | null = null;
+
+const playerStatusPayload = () => ({ ...autoplayer, activeTrack: autoplayer.activeTrack ? { ...autoplayer.activeTrack } : null });
+const emitPlayerState = () => emitSSE('player', playerStatusPayload());
+
+function clearPlayerTimer() {
+  if (playerTimeoutHandle) { clearTimeout(playerTimeoutHandle); playerTimeoutHandle = null; }
+}
+
+function stopPlayer(reason: string, status: PlayerState['status'] = 'idle') {
+  clearPlayerTimer();
+  autoplayer.status = status;
+  autoplayer.activeTrack = null;
+  autoplayer.trackStartedAt = null;
+  autoplayer.trackEndsAt = null;
+  autoplayer.remainingMs = 0;
+  autoplayer.stoppedReason = reason;
+  emitPlayerState();
+}
+
+function schedulePlayerStep(ms: number) {
+  clearPlayerTimer();
+  playerTimeoutHandle = setTimeout(completePlay, Math.max(25, ms));
+}
+
+function shuffled<T>(items: T[]): T[] {
+  for (let i = items.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [items[i], items[j]] = [items[j], items[i]]; }
+  return items;
+}
+
+function startPlay() {
+  if (autoplayer.status !== 'playing') return;
+  if (!autoplayer.queue.length) { stopPlayer('The queue is empty.', 'completed'); return; }
+  if (autoplayer.currentIndex >= autoplayer.queue.length) {
+    if (!autoplayer.loopQueue) { stopPlayer(`Queue finished after ${autoplayer.playsCompleted} tracked plays.`, 'completed'); return; }
+    autoplayer.currentIndex = 0;
+  }
+  const track = autoplayer.queue[autoplayer.currentIndex];
+  autoplayer.remainingMs = autoplayer.trackDurationSeconds * 1000;
+  autoplayer.activeTrack = track;
+  autoplayer.trackStartedAt = Date.now();
+  autoplayer.trackEndsAt = autoplayer.trackStartedAt + autoplayer.remainingMs;
+  autoplayer.stoppedReason = null;
+  emitPlayerState();
+  schedulePlayerStep(autoplayer.remainingMs);
+}
+
+function completePlay() {
+  if (autoplayer.status !== 'playing' || !autoplayer.activeTrack) return;
+  const track = autoplayer.activeTrack;
+  const durationMs = autoplayer.trackStartedAt ? Date.now() - autoplayer.trackStartedAt : autoplayer.trackDurationSeconds * 1000;
+  autoplayer.playsCompleted += 1;
+  autoplayer.lastPlayAt = Date.now();
+  recordActivity('info', `AutoPlayer completed play ${autoplayer.playsCompleted}: "${track.name}" by ${track.artist}. Tracked locally - no Last.fm API call was made.`, {
+    category: 'player', track: track.name, artist: track.artist, album: track.album,
+    outcome: 'played', count: autoplayer.playsCompleted, total: autoplayer.queue.length,
+    jobId: autoplayer.sessionId || undefined, durationMs,
+  });
+  autoplayer.currentIndex += 1;
+  autoplayer.activeTrack = null;
+  emitPlayerState();
+  startPlay();
+}
+
+function pausePlayer() {
+  if (autoplayer.status !== 'playing') return false;
+  clearPlayerTimer();
+  autoplayer.remainingMs = autoplayer.trackEndsAt ? Math.max(25, autoplayer.trackEndsAt - Date.now()) : autoplayer.remainingMs;
+  autoplayer.status = 'paused';
+  emitPlayerState();
+  return true;
+}
+
+function resumePlayer() {
+  if (autoplayer.status !== 'paused') return false;
+  autoplayer.status = 'playing';
+  autoplayer.trackEndsAt = Date.now() + autoplayer.remainingMs;
+  emitPlayerState();
+  schedulePlayerStep(autoplayer.remainingMs);
+  return true;
 }
 
 // Single-operator application: mutations must originate from the current UI.
@@ -1335,6 +1429,56 @@ app.get('/api/job/status', (_req: Request, res: Response) => {
 app.post('/api/job/clear-logs', (_req: Request, res: Response) => {
   addLog('info', 'Console view cleared; persisted activity history retained.');
   return res.json({ ok: true });
+});
+
+// AutoPlayer routes: local playback simulation for tracks, artists and album queues.
+app.get('/api/player/status', (_req: Request, res: Response) => {
+  return res.json({ ok: true, player: playerStatusPayload() });
+});
+
+app.post('/api/player/start', (req: Request, res: Response) => {
+  if (autoplayer.status === 'playing' || autoplayer.status === 'paused') {
+    return res.status(409).json({ ok: false, error: 'The AutoPlayer is already running. Stop the current session first.' });
+  }
+  const { queue, trackDurationSeconds, loopQueue, shuffle } = req.body;
+  const resolvedQueue: QueueTrack[] = Array.isArray(queue) ? queue.map(t => ({ id: typeof t?.id === 'string' ? t.id : crypto.randomUUID(), name: t?.name, artist: t?.artist, album: typeof t?.album === 'string' ? t.album : '', duration: typeof t?.duration === 'number' && Number.isFinite(t.duration) && t.duration > 0 ? t.duration : 30, image: typeof t?.image === 'string' && t.image.startsWith('https://') ? t.image : undefined })) : [];
+  const requestedDuration = trackDurationSeconds === undefined ? 30 : Number(trackDurationSeconds);
+  if (!resolvedQueue.length || resolvedQueue.length > 5000 || resolvedQueue.some(t => typeof t?.name !== 'string' || !t.name.trim() || typeof t.artist !== 'string' || !t.artist.trim()) || !Number.isFinite(requestedDuration) || requestedDuration < 1 || requestedDuration > 3600) {
+    return res.status(400).json({ ok: false, error: 'The AutoPlayer needs 1-5000 tracks and a play duration between 1 and 3600 seconds.' });
+  }
+  clearPlayerTimer();
+  autoplayer.sessionId = crypto.randomUUID();
+  autoplayer.queue = shuffle === true ? shuffled([...resolvedQueue]) : resolvedQueue;
+  autoplayer.currentIndex = 0;
+  autoplayer.trackDurationSeconds = Math.round(requestedDuration);
+  autoplayer.loopQueue = loopQueue !== false;
+  autoplayer.shuffle = shuffle === true;
+  autoplayer.playsCompleted = 0;
+  autoplayer.startedAt = Date.now();
+  autoplayer.lastPlayAt = null;
+  autoplayer.stoppedReason = null;
+  autoplayer.status = 'playing';
+  recordActivity('info', `AutoPlayer session started: ${autoplayer.queue.length} track${autoplayer.queue.length === 1 ? '' : 's'}, ${autoplayer.trackDurationSeconds}s per play${autoplayer.loopQueue ? ', looping' : ''}. Local mode - no Last.fm API calls.`, { category: 'player', jobId: autoplayer.sessionId, total: autoplayer.queue.length });
+  emitPlayerState();
+  startPlay();
+  return res.json({ ok: true, player: playerStatusPayload() });
+});
+
+app.post('/api/player/pause', (_req: Request, res: Response) => {
+  return pausePlayer() ? res.json({ ok: true, player: playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not playing.' });
+});
+
+app.post('/api/player/resume', (_req: Request, res: Response) => {
+  return resumePlayer() ? res.json({ ok: true, player: playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not paused.' });
+});
+
+app.post('/api/player/stop', (_req: Request, res: Response) => {
+  if (autoplayer.status !== 'idle') {
+    const played = autoplayer.playsCompleted;
+    stopPlayer(`Stopped after ${played} tracked play${played === 1 ? '' : 's'}.`);
+    recordActivity('info', `AutoPlayer session stopped after ${played} locally tracked play${played === 1 ? '' : 's'}. No Last.fm API calls were made.`, { category: 'player', jobId: autoplayer.sessionId || undefined, count: played, total: autoplayer.queue.length });
+  }
+  return res.json({ ok: true, player: playerStatusPayload() });
 });
 
 app.use('/api', (err: any, _req: Request, res: Response, _next: express.NextFunction) => {

@@ -52,6 +52,7 @@ export function activitySummary() {
     SUM(CASE WHEN outcome='uncertain' THEN 1 ELSE 0 END) uncertainRequests,
     SUM(CASE WHEN outcome='attempt' THEN 1 ELSE 0 END) requests,
     SUM(CASE WHEN outcome='simulated' THEN 1 ELSE 0 END) simulated,
+    COALESCE(SUM(CASE WHEN outcome='played' THEN 1 ELSE 0 END),0) played,
     MIN(timestamp) oldestAt, MAX(timestamp) latestAt FROM activity`).get();
   return { ...row, retentionDays, storage: 'sqlite', healthy: true };
 }

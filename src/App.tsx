@@ -12,6 +12,7 @@ import { UniversalSearchExplorer } from './components/UniversalSearchExplorer';
 import { ProfileHarvester } from './components/ProfileHarvester';
 import { ArtistCatalogExplorer } from './components/ArtistCatalogExplorer';
 import { ActiveQueueManager } from './components/ActiveQueueManager';
+import { AutoPlayer } from './components/AutoPlayer';
 import { CatchUpBanner } from './components/CatchUpBanner';
 import { LiveConsole } from './components/LiveConsole';
 const RecentScrobblesFeed = lazy(() => import('./components/RecentScrobblesFeed').then(module => ({ default: module.RecentScrobblesFeed })));
@@ -22,8 +23,10 @@ import {
   RecentTrack,
   QueueTrack,
   ActivitySummary,
+  PlayerState,
+  NavTab,
 } from './types';
-import { Radio, Info, ArrowUpRight, X, Search, ListMusic, Disc, Users, Zap, ShieldCheck } from 'lucide-react';
+import { Radio, Info, ArrowUpRight, X, Search, ListMusic, Disc, Users, Zap, ShieldCheck, PlayCircle } from 'lucide-react';
 
 const STORAGE_CREDS_KEY = 'scrobbleforge_creds';
 const STORAGE_QUEUE_KEY = 'scrobbleforge_queue';
@@ -40,14 +43,13 @@ const DEFAULT_CREDS: LastFmCredentials = {
 export default function App() {
   const [connection, setConnection] = useState('connecting');
   const [summary, setSummary] = useState<ActivitySummary | null>(null);
+  const [player, setPlayer] = useState<PlayerState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [isSubmittingBatch, setIsSubmittingBatch] = useState(false);
   const batchBusy = useRef(false);
   const recentBusy = useRef(false);
   // Navigation / workspace tab
-  const [activeNavTab, setActiveNavTab] = useState<
-    'stream' | 'search' | 'harvester' | 'artist' | 'queue' | 'instant'
-  >('stream');
+  const [activeNavTab, setActiveNavTab] = useState<NavTab>('stream');
   const visitedTabs = useRef(new Set<string>(['stream']));
   visitedTabs.current.add(activeNavTab);
 
@@ -233,6 +235,8 @@ export default function App() {
         if (!res.ok) throw new Error('Journal unavailable');
         const data = await res.json();
         setSummary(data.summary);
+        const playerRes = await fetch('/api/player/status');
+        if (playerRes.ok) setPlayer((await playerRes.json()).player);
       } catch { setSummary(null); }
       finally { busy = false; }
     };
@@ -288,6 +292,14 @@ export default function App() {
         fetchUserInfo();
       } catch (err) {
         console.error('SSE completed error', err);
+      }
+    });
+
+    eventSource.addEventListener('player', (e) => {
+      try {
+        setPlayer(JSON.parse(e.data));
+      } catch (err) {
+        console.error('SSE player error', err);
       }
     });
 
@@ -434,6 +446,21 @@ export default function App() {
   const handleStopJob = () => jobAction('stop');
   const handleClearLogs = () => { void jobAction('clear-logs'); };
 
+  // AutoPlayer actions: local playback simulation with no Last.fm API involvement.
+  const playerAction = async (action: 'start' | 'pause' | 'resume' | 'stop', body?: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`/api/player/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      const data = await response.json();
+      if (!data.ok) setNotice(data.error || 'AutoPlayer action failed.');
+      if (data.player) setPlayer(data.player);
+    } catch { setNotice('Could not reach the AutoPlayer. Check connection status.'); }
+  };
+  const handleStartPlayer = (params: { queue: QueueTrack[]; trackDurationSeconds: number; loopQueue: boolean; shuffle: boolean }) => playerAction('start', params);
+
   // Instant Single Scrobble
   const handleSingleScrobble = async (
     artist: string,
@@ -543,7 +570,7 @@ export default function App() {
         {['running', 'paused', 'rate_limited', 'error'].includes(job.status) && <div className="studio-panel p-4 flex flex-wrap items-center justify-between gap-3"><div className="text-xs"><span className="text-zinc-200 font-semibold">{job.queueMode === 'single_loop' ? `${job.artist} — ${job.track}` : `Queue session · ${job.queue.length} tracks`}</span><p className="mt-1 text-zinc-500">{job.scrobblesCompleted} accepted · {job.ignoredCount || 0} ignored · {job.simulatedCount || 0} simulated · {job.status.replace('_', ' ')}</p></div><div className="flex gap-2">{['running', 'rate_limited'].includes(job.status) && <button className="secondary-button text-xs" onClick={handlePauseJob}>Pause</button>}{job.status === 'paused' && <button className="secondary-button text-xs" onClick={handleResumeJob}>Resume</button>}<button className="secondary-button text-xs text-rose-300" onClick={handleStopJob}>Stop session</button></div></div>}
         {isSubmittingBatch && <div role="status" className="studio-panel p-4 flex flex-wrap justify-between gap-3 items-center text-xs"><span className="text-zinc-300">Batch in progress. Confirmed chunk results appear in the journal.</span><button className="secondary-button" onClick={() => void jobAction('cancel-batch')}>Cancel remaining chunks</button></div>}
         <nav aria-label="Workspace" className="workspace-tabs flex overflow-x-auto gap-1.5 border-b border-zinc-800 pb-3">
-          {([{ id: 'stream', label: 'Live engine', icon: Radio }, { id: 'search', label: 'Discover', icon: Search }, { id: 'harvester', label: 'Import profile', icon: Users }, { id: 'artist', label: 'Catalog', icon: Disc }, { id: 'queue', label: 'Queue', icon: ListMusic }, { id: 'instant', label: 'Instant actions', icon: Zap }] as const).map(({ id, label, icon: Icon }) => <button key={id} aria-current={activeNavTab === id ? 'page' : undefined} onClick={() => setActiveNavTab(id)} className={`flex items-center gap-2 shrink-0 px-4 py-2.5 rounded-xl text-xs font-medium ${activeNavTab === id ? 'bg-red-500/10 text-red-300 border border-red-500/25' : 'text-zinc-400 hover:bg-zinc-900 border border-transparent'}`}><Icon size={15} />{label}{id === 'queue' && <span className="text-[10px] rounded-full bg-zinc-800 px-1.5 py-0.5">{queue.length}</span>}</button>)}
+          {([{ id: 'stream', label: 'Live engine', icon: Radio }, { id: 'search', label: 'Discover', icon: Search }, { id: 'harvester', label: 'Import profile', icon: Users }, { id: 'artist', label: 'Catalog', icon: Disc }, { id: 'queue', label: 'Queue', icon: ListMusic }, { id: 'player', label: 'Auto player', icon: PlayCircle }, { id: 'instant', label: 'Instant actions', icon: Zap }] as const).map(({ id, label, icon: Icon }) => <button key={id} aria-current={activeNavTab === id ? 'page' : undefined} onClick={() => setActiveNavTab(id)} className={`flex items-center gap-2 shrink-0 px-4 py-2.5 rounded-xl text-xs font-medium ${activeNavTab === id ? 'bg-red-500/10 text-red-300 border border-red-500/25' : 'text-zinc-400 hover:bg-zinc-900 border border-transparent'}`}><Icon size={15} />{label}{id === 'queue' && <span className="text-[10px] rounded-full bg-zinc-800 px-1.5 py-0.5">{queue.length}</span>}</button>)}
         </nav>
 
         {/* CATCH-UP BANNER: Displays when live session has been idle for >= 1 hour */}
@@ -634,6 +661,20 @@ export default function App() {
                 onShuffleQueue={handleShuffleQueue}
                 onStartStreamingQueue={handleStartStreamingQueue}
                 onBatchScrobbleQueue={handleBatchScrobbleQueue}
+              />
+              </div>
+            )}
+
+            {visitedTabs.current.has('player') && (
+              <div hidden={activeNavTab !== 'player'}>
+              <AutoPlayer
+                player={player}
+                queue={queue}
+                fallbackTrack={{ artist: job.artist, track: job.track, album: job.album }}
+                onStart={handleStartPlayer}
+                onPause={() => playerAction('pause')}
+                onResume={() => playerAction('resume')}
+                onStop={() => playerAction('stop')}
               />
               </div>
             )}

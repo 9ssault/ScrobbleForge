@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -24,7 +25,7 @@ async function harness() {
   let output = '';
   async function start() {
     process = spawn(globalThis.process.execPath, ['--import', 'tsx', '--import', './tests/lastfm-fixture.mjs', globalThis.process.env.TEST_BUILT_SERVER === 'true' ? 'server.js' : 'server.ts'], {
-      cwd: globalThis.process.cwd(), env: { ...globalThis.process.env, PORT: String(address.port), NODE_ENV: 'production', ACTIVITY_DB_PATH: path.join(dir, 'activity.sqlite'), LASTFM_API_KEY: 'test-key', LASTFM_API_SECRET: 'secret-marker' }, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: globalThis.process.cwd(), env: { ...globalThis.process.env, PORT: String(address.port), NODE_ENV: 'production', ACTIVITY_DB_PATH: path.join(dir, 'activity.sqlite'), LASTFM_CALL_LOG: path.join(dir, 'lastfm-calls.log'), LASTFM_API_KEY: 'test-key', LASTFM_API_SECRET: 'secret-marker' }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.stdout?.on('data', chunk => { output += chunk; }); process.stderr?.on('data', chunk => { output += chunk; });
     for (let i = 0; i < 100; i++) {
@@ -44,7 +45,7 @@ async function harness() {
     return { status: response.status, headers: response.headers, data: await response.json() };
   };
   await start();
-  return { origin, get, post, restart: async () => { await stop(); await start(); }, close: async () => { await stop(); await rm(dir, { recursive: true, force: true }); } };
+  return { origin, get, post, dir, restart: async () => { await stop(); await start(); }, close: async () => { await stop(); await rm(dir, { recursive: true, force: true }); } };
 }
 
 test('persistent journal records more than 500 events, pages/searches/exports and survives view clearing, new jobs and restart', async () => {
@@ -211,5 +212,36 @@ test('daily ignored limit records a rate-limit event and stops the stream rather
     await delay(700);
     const summary = (await app.get('/api/activity/summary')).summary;
     assert.equal(summary.rateLimitHits, 1); assert.equal(summary.requests, 1); assert.equal(summary.ignored, 1);
+  } finally { await app.close(); }
+});
+
+test('AutoPlayer journals every completed play locally and makes zero Last.fm API calls', async () => {
+  const app = await harness();
+  try {
+    const callLog = path.join(app.dir, 'lastfm-calls.log');
+    assert.equal((await app.post('/api/player/start', { queue: [{ name: 'local', artist: 'Artist' }], trackDurationSeconds: 0.5 })).status, 400);
+    assert.equal((await app.post('/api/player/start', { queue: [{ artist: 'Artist' }] })).status, 400);
+    assert.equal((await app.post('/api/player/start', {}, { Origin: 'https://foreign.example' })).status, 403);
+    const started = await app.post('/api/player/start', { queue: [{ name: 'local-a', artist: 'Artist' }, { name: 'local-b', artist: 'Artist' }], trackDurationSeconds: 1, loopQueue: false });
+    assert.equal(started.status, 200); assert.equal(started.data.player.apiFree, true); assert.equal(started.data.player.status, 'playing');
+    assert.equal((await app.post('/api/player/start', { queue: [{ name: 'blocked', artist: 'Artist' }] })).status, 409);
+    assert.equal((await app.post('/api/player/pause')).data.player.status, 'paused');
+    assert.equal((await app.post('/api/player/resume')).data.player.status, 'playing');
+    const finished = await until(() => app.get('/api/player/status'), data => data.player.status === 'completed');
+    assert.equal(finished.player.playsCompleted, 2);
+    const summary = (await app.get('/api/activity/summary')).summary;
+    assert.equal(summary.played, 2);
+    assert.equal(summary.requests, 0); assert.equal(summary.accepted, 0); assert.equal(summary.ignored, 0);
+    assert.equal(summary.rateLimitHits, 0); assert.equal(summary.simulated, 0); assert.equal(summary.uncertainRequests, 0);
+    const journal = (await app.get('/api/activity?search=AutoPlayer')).logs;
+    const plays = journal.filter((log: any) => log.outcome === 'played');
+    assert.equal(plays.length, 2);
+    assert.ok(plays.every((log: any) => log.category === 'player' && log.artist === 'Artist' && log.count >= 1 && log.durationMs >= 0));
+    assert.equal(existsSync(callLog) ? readFileSync(callLog, 'utf8').trim() : '', '', 'AutoPlayer must not call the Last.fm API');
+    // Control: the fixture does record real calls, so an empty log above really means "no API traffic".
+    assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'accepted' })).status, 200);
+    assert.match(readFileSync(callLog, 'utf8'), /track\.scrobble/);
+    const after = (await app.get('/api/activity/summary')).summary;
+    assert.equal(after.played, 2); assert.equal(after.accepted, 1); assert.equal(after.requests, 1);
   } finally { await app.close(); }
 });

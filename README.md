@@ -6,6 +6,29 @@ Elevates the original Python `scrobble.py` and `main.py` scripts into a comprehe
 
 ---
 
+## ▶️ AutoPlayer — local playback simulation, zero Last.fm API calls
+
+The **Auto player** tab plays through a track list on a real-time schedule without touching the
+Last.fm API: no credentials, no metadata lookups, no `track.scrobble` submissions, no cooldowns
+and no daily caps. Instead of talking to Last.fm, every finished play is written to this
+workspace's own persistent activity journal (`category: player`, `outcome: played`), counted in
+the dashboard summary as **played**, and exportable with the rest of the activity NDJSON.
+
+API surface (all mutations are same-origin protected like the rest of the workspace):
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/player/start` | `{ queue: QueueTrack[], trackDurationSeconds, loopQueue, shuffle }` — starts a session (1–5000 tracks, 1–3600s per play) |
+| `POST /api/player/pause` / `/api/player/resume` | Pause and resume the current play, keeping the remaining time |
+| `POST /api/player/stop` | Ends the session and journals a summary line |
+| `GET /api/player/status` | Current player state (also streamed over `/api/job/events` as the `player` event) |
+
+Because the Last.fm API is the only supported way to send data to Last.fm, plays made in this mode
+stay local. If you also want them on Last.fm, use the scrobble engine (which authenticates and
+submits through the official API) — AutoPlayer deliberately never does.
+
+---
+
 ## 📱 Quick Access: Mobile & Web (No Install Needed)
 
 You can run ScrobbleForge directly on **any smartphone, tablet, or computer** through the web browser:
