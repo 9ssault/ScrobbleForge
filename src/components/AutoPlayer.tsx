@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Play, Pause, Square, Music, ListMusic, Clock, ShieldCheck, Waves, Check, Activity, Radio } from 'lucide-react';
 import { PlayerState, QueueTrack } from '../types';
+import { SpotifyPlayer } from './SpotifyPlayer';
 
 interface AutoPlayerProps {
   player: PlayerState | null;
@@ -10,20 +11,29 @@ interface AutoPlayerProps {
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
+  isLastFmConnected: boolean;
+  spotifyClientId: string | null;
+  onScrobble: (artist: string, track: string, album: string, timestamp?: number) => Promise<boolean>;
+  onNowPlaying: (artist: string, track: string, album: string) => Promise<boolean>;
 }
 
 const QUICK_DURATIONS = [5, 15, 30, 60, 180] as const;
+const PLAYER_MODE_KEY = 'scrobbleforge_player_mode';
 
 const Equalizer: React.FC<{ active: boolean }> = ({ active }) => <span aria-hidden className="flex items-end gap-[3px] h-5">
   {[0, 1, 2, 3].map(bar => <span key={bar} className={`w-[3px] rounded-full ${active ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-700'}`} style={{ height: active ? `${[45, 100, 65, 85][bar]}%` : '30%', animationDelay: `${bar * 140}ms` }} />)}
 </span>;
 
-export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackTrack, onStart, onPause, onResume, onStop }) => {
+export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackTrack, onStart, onPause, onResume, onStop, isLastFmConnected, spotifyClientId, onScrobble, onNowPlaying }) => {
   const [trackDurationSeconds, setTrackDurationSeconds] = useState(30);
   const [loopQueue, setLoopQueue] = useState(true);
   const [shuffle, setShuffle] = useState(false);
   const [useEngineTrack, setUseEngineTrack] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [mode, setMode] = useState<'local' | 'spotify'>(() => {
+    try { return localStorage.getItem(PLAYER_MODE_KEY) === 'spotify' ? 'spotify' : 'local'; } catch { return 'local'; }
+  });
+  useEffect(() => { try { localStorage.setItem(PLAYER_MODE_KEY, mode); } catch { /* preference only */ } }, [mode]);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(timer); }, []);
 
@@ -48,10 +58,18 @@ export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackT
 
   return <section className="studio-panel overflow-hidden" aria-label="Auto player">
     <div className="p-5 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/70">
-      <div className="flex items-center gap-3"><div className="panel-icon"><Waves size={18} /></div><div><h2 className="text-sm font-semibold">Auto player</h2><p className="text-xs text-zinc-500 mt-0.5">Continuous local playback simulation. Runs entirely offline from Last.fm.</p></div></div>
+      <div className="flex items-center gap-3"><div className="panel-icon"><Waves size={18} /></div><div><h2 className="text-sm font-semibold">Auto player</h2><p className="text-xs text-zinc-500 mt-0.5">Local simulation or real Spotify playback with Last.fm scrobbling.</p></div></div>
       <div className="flex items-center gap-3"><Equalizer active={status === 'playing'} /><span className={`text-[10px] uppercase tracking-wider px-2.5 py-1.5 rounded-lg border ${tone}`}>{status}</span></div>
     </div>
 
+    <div className="px-5 py-3 border-b border-zinc-800/70 flex flex-wrap items-center gap-2">
+      {([{ id: 'local', label: 'Local simulation' }, { id: 'spotify', label: 'Spotify playback' }] as const).map(({ id, label }) => (
+        <button key={id} type="button" aria-pressed={mode === id} onClick={() => setMode(id)} className={`px-3 py-2 rounded-lg border text-xs transition-colors ${mode === id ? 'bg-red-500/10 text-red-300 border-red-500/25' : 'border-zinc-800 text-zinc-400 hover:bg-zinc-900'}`}>{label}</button>
+      ))}
+      <span className="text-[11px] text-zinc-500">{mode === 'local' ? 'Journals plays locally with zero Last.fm API calls.' : 'Plays real audio through Spotify and scrobbles certified plays to Last.fm.'}</span>
+    </div>
+
+    {mode === 'local' ? <>
     <div className="px-5 py-3 bg-red-500/[0.06] border-b border-red-500/15 flex items-start gap-2 text-[11px] text-zinc-300">
       <ShieldCheck size={15} className="text-red-400 shrink-0 mt-0.5" />
       <p><span className="font-semibold text-zinc-200">Zero Last.fm API calls.</span> No credentials, no metadata lookups, no scrobbles, no rate limits or daily caps. Every finished play is recorded in this workspace&apos;s own activity journal instead.</p>
@@ -128,5 +146,6 @@ export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackT
 
       {player?.startedAt && <p className="text-[11px] text-zinc-500">Session started {new Date(player.startedAt).toLocaleTimeString()} · {plays} play{plays === 1 ? '' : 's'} journaled locally · no Last.fm request was made</p>}
     </div>
+    </> : <SpotifyPlayer queue={queue} isLastFmConnected={isLastFmConnected} spotifyClientId={spotifyClientId} onScrobble={onScrobble} onNowPlaying={onNowPlaying} />}
   </section>;
 };

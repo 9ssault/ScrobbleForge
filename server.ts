@@ -16,6 +16,7 @@ const LASTFM_API_URL = 'https://ws.audioscrobbler.com/2.0/';
 
 const ENV_API_KEY = process.env.LASTFM_API_KEY || '';
 const ENV_API_SECRET = process.env.LASTFM_API_SECRET || '';
+const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || '';
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -531,6 +532,13 @@ app.get('/api/lastfm/server-config', (_req: Request, res: Response) => {
 });
 
 // Authenticate with Last.fm
+// Spotify playback bridge: public configuration only. Browser-side OAuth uses the
+// Authorization Code + PKCE flow, which needs just the public Client ID; no client
+// secret is ever requested, stored or transmitted.
+app.get('/api/spotify/config', (_req: Request, res: Response) => {
+  return res.json({ ok: true, clientId: SPOTIFY_CLIENT_ID || null, redirectPath: '/spotify-callback' });
+});
+
 app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
   if (inFlight || instantRunning || batchRunning || ['running', 'rate_limited'].includes(activeJob.status)) return res.status(409).json({ ok: false, error: 'Pause or stop active submissions before changing credentials.' });
   try {
@@ -1479,6 +1487,29 @@ app.post('/api/player/stop', (_req: Request, res: Response) => {
     recordActivity('info', `AutoPlayer session stopped after ${played} locally tracked play${played === 1 ? '' : 's'}. No Last.fm API calls were made.`, { category: 'player', jobId: autoplayer.sessionId || undefined, count: played, total: autoplayer.queue.length });
   }
   return res.json({ ok: true, player: playerStatusPayload() });
+});
+
+// Spotify playback bridge: the browser plays audio through Spotify (Web Playback SDK
+// device or any Spotify Connect device) and reports every completed play here so the
+// local dashboard counts it like a simulated play. Plays that were also submitted to
+// Last.fm are marked accordingly; the Last.fm submission itself goes through the
+// regular scrobble endpoints.
+app.post('/api/player/played', (req: Request, res: Response) => {
+  const { track, artist, album, durationMs, source, sessionId, scrobbled } = req.body || {};
+  if (typeof track !== 'string' || !track.trim() || track.length > 500 || typeof artist !== 'string' || !artist.trim() || artist.length > 500) {
+    return res.status(400).json({ ok: false, error: 'A completed play needs a track and artist name (up to 500 characters).' });
+  }
+  if (album !== undefined && (typeof album !== 'string' || album.length > 500)) {
+    return res.status(400).json({ ok: false, error: 'Album must be a string up to 500 characters.' });
+  }
+  const resolvedDuration = Number.isFinite(Number(durationMs)) ? Math.max(0, Math.min(Math.round(Number(durationMs)), 86400000)) : 0;
+  const resolvedSource = source === 'spotify' ? 'Spotify' : 'Local';
+  const resolvedSession = typeof sessionId === 'string' && sessionId.length <= 100 ? sessionId : undefined;
+  recordActivity('info', `${resolvedSource} playback completed: "${track.trim()}" by ${artist.trim()}${scrobbled === true ? ' - submitted to Last.fm.' : ' - kept local (no Last.fm submission).'}`, {
+    category: 'player', track: track.trim(), artist: artist.trim(), album: typeof album === 'string' && album.trim() ? album.trim() : undefined,
+    outcome: 'played', durationMs: resolvedDuration, jobId: resolvedSession,
+  });
+  return res.json({ ok: true });
 });
 
 app.use('/api', (err: any, _req: Request, res: Response, _next: express.NextFunction) => {

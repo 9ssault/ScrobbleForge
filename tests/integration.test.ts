@@ -245,3 +245,27 @@ test('AutoPlayer journals every completed play locally and makes zero Last.fm AP
     assert.equal(after.played, 2); assert.equal(after.accepted, 1); assert.equal(after.requests, 1);
   } finally { await app.close(); }
 });
+
+test('Spotify playback reports journal completed plays locally and never call the Last.fm API', async () => {
+  const app = await harness();
+  try {
+    assert.equal((await app.post('/api/player/played', { track: '', artist: 'Artist' })).status, 400);
+    assert.equal((await app.post('/api/player/played', { track: 'Track', artist: '' })).status, 400);
+    assert.equal((await app.post('/api/player/played', { track: 'Track', artist: 'Artist', album: 42 })).status, 400);
+    assert.equal((await app.post('/api/player/played', { track: 'Track', artist: 'Artist' }, { Origin: 'https://foreign.example' })).status, 403);
+    const before = (await app.get('/api/activity/summary')).summary.requests;
+    assert.equal((await app.post('/api/player/played', { track: 'Spotify Track', artist: 'Spotify Artist', album: 'Spotify Album', durationMs: 123456, source: 'spotify', scrobbled: false, sessionId: 'spotify-session' })).status, 200);
+    assert.equal((await app.post('/api/player/played', { track: 'Scrobbled Track', artist: 'Spotify Artist', durationMs: 60000, source: 'spotify', scrobbled: true, sessionId: 'spotify-session' })).status, 200);
+    const summary = (await app.get('/api/activity/summary')).summary;
+    assert.equal(summary.played, 2);
+    assert.equal(summary.requests, before);
+    assert.equal(summary.accepted, 0);
+    const journal = (await app.get('/api/activity?search=Spotify%20Track')).logs;
+    const play = journal.find((log: any) => log.track === 'Spotify Track');
+    assert.ok(play, 'the completed play is journaled');
+    assert.equal(play.category, 'player'); assert.equal(play.outcome, 'played');
+    assert.equal(play.artist, 'Spotify Artist'); assert.equal(play.album, 'Spotify Album'); assert.equal(play.durationMs, 123456); assert.equal(play.jobId, 'spotify-session');
+    const callLog = path.join(app.dir, 'lastfm-calls.log');
+    assert.equal(existsSync(callLog) ? readFileSync(callLog, 'utf8').trim() : '', '', 'reporting a completed play must not call the Last.fm API');
+  } finally { await app.close(); }
+});

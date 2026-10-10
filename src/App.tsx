@@ -14,6 +14,7 @@ import { ArtistCatalogExplorer } from './components/ArtistCatalogExplorer';
 import { ActiveQueueManager } from './components/ActiveQueueManager';
 import { AutoPlayer } from './components/AutoPlayer';
 import { CatchUpBanner } from './components/CatchUpBanner';
+import { handleSpotifyRedirect } from './spotify';
 import { LiveConsole } from './components/LiveConsole';
 const RecentScrobblesFeed = lazy(() => import('./components/RecentScrobblesFeed').then(module => ({ default: module.RecentScrobblesFeed })));
 import {
@@ -86,6 +87,27 @@ export default function App() {
       localStorage.setItem(STORAGE_QUEUE_KEY, JSON.stringify(queue));
     } catch { setNotice('Queue could not be saved in this browser. Export it before leaving.'); }
   }, [queue]);
+
+  // Spotify playback bridge (optional): public Client ID from the server plus the OAuth redirect.
+  const [spotifyClientId, setSpotifyClientId] = useState<string | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch('/api/spotify/config');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (typeof data.clientId === 'string' && data.clientId) setSpotifyClientId(data.clientId);
+      } catch { /* Spotify is optional; the Auto player tab explains how to connect it. */ }
+    })();
+  }, []);
+
+  useEffect(() => {
+    void handleSpotifyRedirect().then(result => {
+      if (!result) return;
+      setNotice(result.message);
+      if (result.ok) setActiveNavTab('player');
+    });
+  }, []);
 
   // Idle session detection
   const [lastLiveTimestamp, setLastLiveTimestamp] = useState<number | null>(() => {
@@ -465,7 +487,8 @@ export default function App() {
   const handleSingleScrobble = async (
     artist: string,
     track: string,
-    album: string
+    album: string,
+    timestamp?: number
   ): Promise<boolean> => {
     try {
       const res = await fetch('/api/lastfm/single-scrobble', {
@@ -475,6 +498,7 @@ export default function App() {
           artist,
           track,
           album,
+          ...(timestamp ? { timestamp } : {}),
           apiKey: credentials.apiKey,
           apiSecret: credentials.apiSecret,
           sessionKey: credentials.sessionKey,
@@ -671,6 +695,10 @@ export default function App() {
                 player={player}
                 queue={queue}
                 fallbackTrack={{ artist: job.artist, track: job.track, album: job.album }}
+                isLastFmConnected={isConnected}
+                spotifyClientId={spotifyClientId}
+                onScrobble={handleSingleScrobble}
+                onNowPlaying={handleUpdateNowPlaying}
                 onStart={handleStartPlayer}
                 onPause={() => playerAction('pause')}
                 onResume={() => playerAction('resume')}

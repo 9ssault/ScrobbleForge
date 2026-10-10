@@ -94,6 +94,7 @@ var PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3e3;
 var LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/";
 var ENV_API_KEY = process.env.LASTFM_API_KEY || "";
 var ENV_API_SECRET = process.env.LASTFM_API_SECRET || "";
+var SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || "";
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 function generateLastFmSig(params, apiSecret) {
@@ -614,6 +615,9 @@ app.get("/api/lastfm/server-config", (_req, res) => {
     hasServerApiKey: Boolean(ENV_API_KEY),
     serverApiKey: ENV_API_KEY || null
   });
+});
+app.get("/api/spotify/config", (_req, res) => {
+  return res.json({ ok: true, clientId: SPOTIFY_CLIENT_ID || null, redirectPath: "/spotify-callback" });
 });
 app.post("/api/lastfm/auth", async (req, res) => {
   if (inFlight || instantRunning || batchRunning || ["running", "rate_limited"].includes(activeJob.status)) return res.status(409).json({ ok: false, error: "Pause or stop active submissions before changing credentials." });
@@ -1398,6 +1402,28 @@ app.post("/api/player/stop", (_req, res) => {
     recordActivity("info", `AutoPlayer session stopped after ${played} locally tracked play${played === 1 ? "" : "s"}. No Last.fm API calls were made.`, { category: "player", jobId: autoplayer.sessionId || void 0, count: played, total: autoplayer.queue.length });
   }
   return res.json({ ok: true, player: playerStatusPayload() });
+});
+app.post("/api/player/played", (req, res) => {
+  const { track, artist, album, durationMs, source, sessionId, scrobbled } = req.body || {};
+  if (typeof track !== "string" || !track.trim() || track.length > 500 || typeof artist !== "string" || !artist.trim() || artist.length > 500) {
+    return res.status(400).json({ ok: false, error: "A completed play needs a track and artist name (up to 500 characters)." });
+  }
+  if (album !== void 0 && (typeof album !== "string" || album.length > 500)) {
+    return res.status(400).json({ ok: false, error: "Album must be a string up to 500 characters." });
+  }
+  const resolvedDuration = Number.isFinite(Number(durationMs)) ? Math.max(0, Math.min(Math.round(Number(durationMs)), 864e5)) : 0;
+  const resolvedSource = source === "spotify" ? "Spotify" : "Local";
+  const resolvedSession = typeof sessionId === "string" && sessionId.length <= 100 ? sessionId : void 0;
+  recordActivity("info", `${resolvedSource} playback completed: "${track.trim()}" by ${artist.trim()}${scrobbled === true ? " - submitted to Last.fm." : " - kept local (no Last.fm submission)."}`, {
+    category: "player",
+    track: track.trim(),
+    artist: artist.trim(),
+    album: typeof album === "string" && album.trim() ? album.trim() : void 0,
+    outcome: "played",
+    durationMs: resolvedDuration,
+    jobId: resolvedSession
+  });
+  return res.json({ ok: true });
 });
 app.use("/api", (err, _req, res, _next) => {
   addLog("error", "API request rejected or internal handler failed.", { category: "system", httpStatus: err.status || 500, outcome: "failed" });

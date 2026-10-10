@@ -1,31 +1,69 @@
 # ScrobbleForge — Universal Last.fm Automation & Scrobbler Studio
 
-A high-performance Last.fm batch scrobbler, catalog harvester, playback simulator, and track manager built with **React**, **TypeScript**, and **Express**.
+A high-performance Last.fm batch scrobbler, catalog harvester, playback simulator, Spotify player, and track manager built with **React**, **TypeScript**, and **Express**.
 
 Elevates the original Python `scrobble.py` and `main.py` scripts into a comprehensive Last.fm workstation with zero placeholders and full real-time API capabilities.
 
 ---
 
-## ▶️ AutoPlayer — local playback simulation, zero Last.fm API calls
+## ▶️ AutoPlayer — local simulation or real Spotify playback
 
-The **Auto player** tab plays through a track list on a real-time schedule without touching the
-Last.fm API: no credentials, no metadata lookups, no `track.scrobble` submissions, no cooldowns
-and no daily caps. Instead of talking to Last.fm, every finished play is written to this
-workspace's own persistent activity journal (`category: player`, `outcome: played`), counted in
-the dashboard summary as **played**, and exportable with the rest of the activity NDJSON.
+The **Auto player** tab has two modes, both driven by the queue you already built.
 
-API surface (all mutations are same-origin protected like the rest of the workspace):
+### 1. Local simulation (zero Last.fm API calls)
+Walks the queue on a real-time schedule without touching the Last.fm API: no credentials, no
+metadata lookups, no `track.scrobble` submissions, no cooldowns and no daily caps. Every finished
+play is written to this workspace's own persistent activity journal (`category: player`,
+`outcome: played`), counted in the dashboard summary as **played**, and exportable with the rest of
+the activity NDJSON.
+
+### 2. Spotify playback (real audio, real scrobbles)
+Plays the queue **inside Spotify** and submits what you actually listened to Last.fm through the
+studio's normal scrobble endpoints (identical rate-limit pacing, cooldowns and journal):
+
+- **Devices** — any Spotify Connect device (phone, desktop, speaker, TV), or this browser itself via
+  the Web Playback SDK ("Play in this browser"). Spotify Premium is required by Spotify for
+  playback control.
+- **Matching** — every queued track is searched on Spotify (using `track:` / `artist:` filters) and
+  scored against the wanted artist, so covers by other artists are rejected. Up to 100 queued tracks
+  are resolved per session.
+- **Now Playing** — sent when a track starts.
+- **Scrobbling** — a finished play is submitted when it satisfies Last.fm's rules: the track is
+  longer than 30 seconds and you heard at least half of it (or four minutes, whichever comes first).
+  The timestamp is the real UTC time the track started.
+- **Journal** — each completed play is also recorded locally (`source: spotify`, `outcome: played`)
+  together with whether it was scrobbled, so the dashboard separates played from accepted.
+- Keep the tab open while tracking: playback state is polled from this page.
+
+#### Connecting Spotify (once)
+1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard) — the
+   Client ID is public and PKCE means no client secret is needed.
+2. Add the redirect URI shown in the Auto player tab to that app. Production requires HTTPS, e.g.
+   `https://your-host/spotify-callback`; for local development Spotify only accepts a loopback IP,
+   e.g. `http://127.0.0.1:3000/spotify-callback` (`localhost` is not accepted).
+3. Add your Spotify account e-mail under the app's **Users Management** (development-mode apps must
+   allow-list every listener).
+4. Paste the Client ID into the Auto player tab, or set it once for the whole server with
+   `SPOTIFY_CLIENT_ID="..."` in `.env` (see `.env.example`) — it is served by `GET /api/spotify/config`.
+5. Press **Connect Spotify**, pick a device, then **Start Spotify player**.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /api/player/start` | `{ queue: QueueTrack[], trackDurationSeconds, loopQueue, shuffle }` — starts a session (1–5000 tracks, 1–3600s per play) |
-| `POST /api/player/pause` / `/api/player/resume` | Pause and resume the current play, keeping the remaining time |
-| `POST /api/player/stop` | Ends the session and journals a summary line |
-| `GET /api/player/status` | Current player state (also streamed over `/api/job/events` as the `player` event) |
+| `POST /api/player/start` | `{ queue, trackDurationSeconds, loopQueue, shuffle }` — starts a local simulation session (1–5000 tracks, 1–3600s per play) |
+| `POST /api/player/pause` / `/resume` | Pause and resume the current simulated play, keeping the remaining time |
+| `POST /api/player/stop` | Ends the simulation and journals a summary line |
+| `GET /api/player/status` | Current simulation state (also streamed over `/api/job/events` as the `player` event) |
+| `POST /api/player/played` | `{ track, artist, album?, durationMs?, source, scrobbled, sessionId? }` — journals a completed Spotify play |
+| `GET /api/spotify/config` | `{ clientId }` — the optional public Spotify Client ID from `.env` |
 
-Because the Last.fm API is the only supported way to send data to Last.fm, plays made in this mode
-stay local. If you also want them on Last.fm, use the scrobble engine (which authenticates and
-submits through the official API) — AutoPlayer deliberately never does.
+Spotify scrobbles go through the existing `/api/lastfm/now-playing` and
+`/api/lastfm/single-scrobble` endpoints, so cooldowns, rate-limit pacing and journaling behave
+exactly like the rest of the studio.
+
+> **Other services:** Spotify is the only major music service with a public playback-control API, so
+> it is the one that can actually start audio for you — and Spotify Connect lets it drive every
+> Spotify device. Services without an API (Apple Music, YouTube Music, …) can still be tracked when
+> you play them yourself, using the local simulation mode or the instant actions.
 
 ---
 
