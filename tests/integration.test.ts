@@ -150,11 +150,11 @@ test('stop during an in-flight submission blocks replacement and prevents anothe
   } finally { await app.close(); }
 });
 
-test('restart restores progress paused, not auto-submitting; disconnect clears server credentials', async () => {
+test('restart restores progress paused, not auto-submitting; disconnect clears job credentials', async () => {
   const app = await harness();
   try {
-    const auth = await app.post('/api/lastfm/auth', { username: 'test-user', password: 'password-marker' }); assert.equal(auth.data.ok, true);
-    await app.post('/api/job/start', { artist: 'Artist', track: 'accepted', limit: 4, interval: 10, jitter: false });
+    const auth = await app.post('/api/lastfm/auth', { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, username: 'test-user', password: 'password-marker' }); assert.equal(auth.data.ok, true);
+    await app.post('/api/job/start', { artist: 'Artist', track: 'accepted', credentials, limit: 4, interval: 10, jitter: false });
     await until(() => app.get('/api/job/status'), data => data.job.scrobblesCompleted === 1);
     await app.restart();
     const restored = await app.get('/api/job/status'); assert.equal(restored.job.status, 'paused'); assert.equal(restored.job.scrobblesCompleted, 1);
@@ -267,5 +267,34 @@ test('Spotify playback reports journal completed plays locally and never call th
     assert.equal(play.artist, 'Spotify Artist'); assert.equal(play.album, 'Spotify Album'); assert.equal(play.durationMs, 123456); assert.equal(play.jobId, 'spotify-session');
     const callLog = path.join(app.dir, 'lastfm-calls.log');
     assert.equal(existsSync(callLog) ? readFileSync(callLog, 'utf8').trim() : '', '', 'reporting a completed play must not call the Last.fm API');
+  } finally { await app.close(); }
+});
+
+test('credentials are never reused across visitors and the server exposes no Last.fm key', async () => {
+  const app = await harness();
+  try {
+    const callLog = path.join(app.dir, 'lastfm-calls.log');
+    const scrobbles = () => (existsSync(callLog) ? readFileSync(callLog, 'utf8').split('track.scrobble').length - 1 : 0);
+
+    // A visitor connects with their own credentials (this used to be cached server-side for everyone).
+    assert.equal((await app.post('/api/lastfm/auth', { ...credentials })).status, 200);
+    const established = scrobbles();
+
+    // Every request without credentials must be refused instead of falling back to that session.
+    assert.equal((await app.post('/api/lastfm/single-scrobble', { artist: 'Intruder', track: 'Intruder' })).status, 400);
+    assert.equal((await app.post('/api/lastfm/now-playing', { artist: 'Intruder', track: 'Intruder' })).status, 400);
+    assert.equal((await app.post('/api/job/batch-scrobble-all', { tracks: [{ name: 'Intruder', artist: 'Intruder' }], spanHours: 1 })).status, 400);
+    assert.equal((await app.post('/api/job/start', { artist: 'Intruder', track: 'Intruder', limit: 1, interval: 0.5 })).status, 400);
+    assert.equal((await fetch(app.origin + '/api/lastfm/search?track=intruder&artist=intruder')).status, 400);
+    assert.equal(scrobbles(), established, 'no scrobble may be submitted without explicit credentials');
+
+    // The server no longer publishes an API key of its own.
+    const gone = await fetch(app.origin + '/api/lastfm/server-config');
+    assert.equal(gone.status, 404);
+    assert.ok(!(await gone.text()).includes('test-key'), 'no server API key may be served');
+
+    // And it still works when the caller brings credentials.
+    assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Operator', track: 'Own-track' })).status, 200);
+    assert.equal(scrobbles(), established + 1);
   } finally { await app.close(); }
 });

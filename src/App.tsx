@@ -198,7 +198,7 @@ export default function App() {
     setIsRefreshingUser(true);
     try {
       const res = await fetch(
-        `/api/lastfm/user-info?${new URLSearchParams({ username: credentials.username })}`
+        `/api/lastfm/user-info?${new URLSearchParams({ username: credentials.username, apiKey: credentials.apiKey })}`
       );
       const data = await res.json();
       if (data.ok && data.user) {
@@ -219,7 +219,7 @@ export default function App() {
     setIsLoadingTracks(true);
     try {
       const res = await fetch(
-        `/api/lastfm/recent-tracks?${new URLSearchParams({ username: credentials.username, limit: '60' })}`
+        `/api/lastfm/recent-tracks?${new URLSearchParams({ username: credentials.username, limit: '60', apiKey: credentials.apiKey })}`
       );
       const data = await res.json();
       if (data.ok && data.recentTracks) {

@@ -92,8 +92,6 @@ var __dirname = path2.dirname(__filename);
 var app = express();
 var PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3e3;
 var LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/";
-var ENV_API_KEY = process.env.LASTFM_API_KEY || "";
-var ENV_API_SECRET = process.env.LASTFM_API_SECRET || "";
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 function generateLastFmSig(params, apiSecret) {
@@ -282,7 +280,7 @@ if (restored) {
 }
 var jobTimeoutHandle = null;
 var inFlight = false;
-var workerCredentials = null;
+var jobCredentials = null;
 async function executeScrobbleStep() {
   if (activeJob.status !== "running" || inFlight) return;
   const executingJob = activeJob;
@@ -330,7 +328,7 @@ async function executeScrobbleStep() {
     scheduleNextStep();
     return;
   }
-  if (!workerCredentials || !workerCredentials.sessionKey) {
+  if (!jobCredentials || !jobCredentials.sessionKey) {
     activeJob.status = "error";
     activeJob.currentError = "Missing Last.fm authentication session.";
     addLog("error", "Authentication failed: No valid Last.fm session key.");
@@ -340,8 +338,8 @@ async function executeScrobbleStep() {
     const timestamp = Math.floor(Date.now() / 1e3);
     const params = {
       method: "track.scrobble",
-      api_key: workerCredentials.apiKey,
-      sk: workerCredentials.sessionKey,
+      api_key: jobCredentials.apiKey,
+      sk: jobCredentials.sessionKey,
       "artist[0]": currentArtist,
       "track[0]": currentTrackName,
       "timestamp[0]": timestamp.toString()
@@ -352,7 +350,7 @@ async function executeScrobbleStep() {
     inFlight = true;
     const response = await callLastFmApi(
       params,
-      workerCredentials.apiSecret,
+      jobCredentials.apiSecret,
       "POST",
       executingJob.jobId
     );
@@ -587,7 +585,7 @@ app.post("/api/lastfm/disconnect", (_req, res) => {
   if (jobTimeoutHandle) clearTimeout(jobTimeoutHandle);
   activeJob.status = "idle";
   batchCancel = true;
-  workerCredentials = null;
+  jobCredentials = null;
   addLog("info", "Account disconnected; worker stopped and server credentials cleared.", { category: "auth" });
   res.json({ ok: true });
 });
@@ -608,20 +606,13 @@ data: ${JSON.stringify(getJobStatusPayload())}
     if (idx !== -1) sseClients.splice(idx, 1);
   });
 });
-app.get("/api/lastfm/server-config", (_req, res) => {
-  res.json({
-    ok: true,
-    hasServerApiKey: Boolean(ENV_API_KEY),
-    serverApiKey: ENV_API_KEY || null
-  });
-});
 app.post("/api/lastfm/auth", async (req, res) => {
   if (inFlight || instantRunning || batchRunning || ["running", "rate_limited"].includes(activeJob.status)) return res.status(409).json({ ok: false, error: "Pause or stop active submissions before changing credentials." });
   try {
     const { apiKey, apiSecret, username, password, sessionKey } = req.body;
     if ([apiKey, apiSecret, username, password, sessionKey].some((value) => value !== void 0 && typeof value !== "string")) return res.status(400).json({ ok: false, error: "Authentication fields must be strings." });
-    const resolvedApiKey = (apiKey || ENV_API_KEY || "").trim();
-    const resolvedApiSecret = (apiSecret || ENV_API_SECRET || "").trim();
+    const resolvedApiKey = (apiKey || "").trim();
+    const resolvedApiSecret = (apiSecret || "").trim();
     if (!resolvedApiKey || !resolvedApiSecret) {
       return res.status(400).json({ ok: false, error: "API Key and API Secret are required." });
     }
@@ -632,12 +623,6 @@ app.post("/api/lastfm/auth", async (req, res) => {
         "GET"
       );
       if (userInfo.data?.user?.name?.toLowerCase() === username.toLowerCase()) {
-        workerCredentials = {
-          apiKey: resolvedApiKey,
-          apiSecret: resolvedApiSecret,
-          sessionKey,
-          username
-        };
         return res.json({
           ok: true,
           sessionKey,
@@ -671,12 +656,6 @@ app.post("/api/lastfm/auth", async (req, res) => {
         }
       } catch {
       }
-      workerCredentials = {
-        apiKey: resolvedApiKey,
-        apiSecret: resolvedApiSecret,
-        sessionKey: key,
-        username: userName
-      };
       addLog("success", "Last.fm authentication established.", { category: "auth" });
       return res.json({
         ok: true,
@@ -696,8 +675,8 @@ app.post("/api/lastfm/auth", async (req, res) => {
 });
 app.get("/api/lastfm/user-info", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
-    const username = req.query.username || workerCredentials?.username;
+    const apiKey = req.query.apiKey || "";
+    const username = req.query.username || "";
     if (!apiKey || !username) {
       return res.status(400).json({ ok: false, error: "API Key and username required" });
     }
@@ -719,8 +698,8 @@ app.get("/api/lastfm/user-info", async (req, res) => {
 });
 app.get("/api/lastfm/recent-tracks", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
-    const username = req.query.username || workerCredentials?.username;
+    const apiKey = req.query.apiKey || "";
+    const username = req.query.username || "";
     const limit = req.query.limit || "15";
     if (!apiKey || !username) {
       return res.status(400).json({ ok: false, error: "API Key and username required" });
@@ -753,8 +732,8 @@ app.get("/api/lastfm/recent-tracks", async (req, res) => {
 });
 app.get("/api/lastfm/fetch-profile-tracks", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
-    const username = req.query.username || workerCredentials?.username;
+    const apiKey = req.query.apiKey || "";
+    const username = req.query.username || "";
     const type = req.query.type || "recents";
     const period = req.query.period || "overall";
     const limitPerPage = Math.min(200, Math.max(10, parseInt(req.query.limit, 10) || 50));
@@ -828,7 +807,7 @@ app.get("/api/lastfm/fetch-profile-tracks", async (req, res) => {
 });
 app.get("/api/lastfm/fetch-artist-tracks", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
+    const apiKey = req.query.apiKey || "";
     const artist = req.query.artist;
     const limit = Math.min(200, Math.max(5, parseInt(req.query.limit, 10) || 50));
     if (!apiKey || !artist) {
@@ -868,7 +847,7 @@ app.get("/api/lastfm/fetch-artist-tracks", async (req, res) => {
 });
 app.get("/api/lastfm/fetch-artist-albums", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
+    const apiKey = req.query.apiKey || "";
     const artist = req.query.artist;
     const limit = Math.min(100, Math.max(5, parseInt(req.query.limit, 10) || 30));
     if (!apiKey || !artist) {
@@ -905,7 +884,7 @@ app.get("/api/lastfm/fetch-artist-albums", async (req, res) => {
 });
 app.get("/api/lastfm/fetch-album-tracks", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
+    const apiKey = req.query.apiKey || "";
     const artist = req.query.artist;
     const album = req.query.album;
     if (!apiKey || !artist || !album) {
@@ -954,7 +933,7 @@ app.get("/api/lastfm/fetch-album-tracks", async (req, res) => {
 });
 app.get("/api/lastfm/search", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey;
+    const apiKey = req.query.apiKey || "";
     const track = req.query.track;
     const artist = req.query.artist;
     if (!apiKey || !track && !artist) {
@@ -984,7 +963,7 @@ app.get("/api/lastfm/search", async (req, res) => {
 });
 app.get("/api/lastfm/search-artist", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey || ENV_API_KEY;
+    const apiKey = req.query.apiKey || "";
     const query = req.query.query;
     const limit = req.query.limit || "12";
     if (!apiKey || !query) {
@@ -1017,7 +996,7 @@ app.get("/api/lastfm/search-artist", async (req, res) => {
 });
 app.get("/api/lastfm/search-album", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey || ENV_API_KEY;
+    const apiKey = req.query.apiKey || "";
     const query = req.query.query;
     const limit = req.query.limit || "12";
     if (!apiKey || !query) {
@@ -1050,7 +1029,7 @@ app.get("/api/lastfm/search-album", async (req, res) => {
 });
 app.get("/api/lastfm/search-user", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey || workerCredentials?.apiKey || ENV_API_KEY;
+    const apiKey = req.query.apiKey || "";
     const username = req.query.username;
     if (!apiKey || !username) {
       return res.status(400).json({ ok: false, error: "Username required" });
@@ -1080,11 +1059,11 @@ app.get("/api/lastfm/search-user", async (req, res) => {
 app.post("/api/lastfm/now-playing", async (req, res) => {
   try {
     const { artist, track, album, apiKey, apiSecret, sessionKey } = req.body;
-    const resolvedApiKey = apiKey || workerCredentials?.apiKey;
-    const resolvedSecret = apiSecret || workerCredentials?.apiSecret;
-    const resolvedSession = sessionKey || workerCredentials?.sessionKey;
+    const resolvedApiKey = apiKey;
+    const resolvedSecret = apiSecret;
+    const resolvedSession = sessionKey;
     if (!resolvedApiKey || !resolvedSecret || !resolvedSession) {
-      return res.status(400).json({ ok: false, error: "Missing Last.fm authentication credentials" });
+      return res.status(400).json({ ok: false, error: "Send your own Last.fm credentials (API key, API secret and session key) with each request; the server never stores them." });
     }
     const params = {
       method: "track.updateNowPlaying",
@@ -1105,11 +1084,11 @@ app.post("/api/lastfm/now-playing", async (req, res) => {
 app.post("/api/lastfm/single-scrobble", async (req, res) => {
   try {
     const { artist, track, album, apiKey, apiSecret, sessionKey, timestamp } = req.body;
-    const resolvedApiKey = apiKey || workerCredentials?.apiKey;
-    const resolvedSecret = apiSecret || workerCredentials?.apiSecret;
-    const resolvedSession = sessionKey || workerCredentials?.sessionKey;
+    const resolvedApiKey = apiKey;
+    const resolvedSecret = apiSecret;
+    const resolvedSession = sessionKey;
     if (!resolvedApiKey || !resolvedSecret || !resolvedSession) {
-      return res.status(400).json({ ok: false, error: "Missing Last.fm authentication credentials" });
+      return res.status(400).json({ ok: false, error: "Send your own Last.fm credentials (API key, API secret and session key) with each request; the server never stores them." });
     }
     const ts = timestamp || Math.floor(Date.now() / 1e3);
     const params = {
@@ -1157,11 +1136,11 @@ app.post("/api/job/batch-scrobble-all", async (req, res) => {
       apiSecret,
       sessionKey
     } = req.body;
-    const resolvedApiKey = apiKey || workerCredentials?.apiKey;
-    const resolvedSecret = apiSecret || workerCredentials?.apiSecret;
-    const resolvedSession = sessionKey || workerCredentials?.sessionKey;
+    const resolvedApiKey = apiKey;
+    const resolvedSecret = apiSecret;
+    const resolvedSession = sessionKey;
     if (!resolvedApiKey || !resolvedSecret || !resolvedSession) {
-      return res.status(400).json({ ok: false, error: "Missing Last.fm credentials" });
+      return res.status(400).json({ ok: false, error: "Send your own Last.fm credentials (API key, API secret and session key); the server never stores them." });
     }
     if (!Array.isArray(tracks) || tracks.length === 0 || tracks.length > 5e3 || tracks.some((t) => typeof t?.name !== "string" || !t.name.trim() || typeof t.artist !== "string" || !t.artist.trim())) {
       return res.status(400).json({ ok: false, error: "No tracks provided for batch scrobbling." });
@@ -1261,9 +1240,9 @@ app.post("/api/job/start", (req, res) => {
     return res.status(400).json({ ok: false, error: "A scrobble job is already running." });
   }
   if (credentials?.apiKey && credentials?.apiSecret && credentials?.sessionKey) {
-    workerCredentials = credentials;
+    jobCredentials = { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, sessionKey: credentials.sessionKey, username: typeof credentials.username === "string" ? credentials.username : "" };
   }
-  if (isDryRun !== true && (!workerCredentials || !workerCredentials.sessionKey)) {
+  if (isDryRun !== true && (!jobCredentials || !jobCredentials.sessionKey)) {
     return res.status(400).json({
       ok: false,
       error: "Please connect Last.fm credentials before starting live scrobbles."
