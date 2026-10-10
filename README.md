@@ -6,6 +6,26 @@ Elevates the original Python `scrobble.py` and `main.py` scripts into a comprehe
 
 ---
 
+## 🔒 Multi-visitor isolation (public hosting)
+
+ScrobbleForge is safe to host publicly: every browser gets its own identity, minted as an
+`HttpOnly`, `SameSite=Lax` cookie on its first API request.
+
+- **Credentials are never stored for anyone else.** Each request carries the caller's own Last.fm
+  API key, secret and session key; the server has no shared key and no fallback cache. A background
+  job keeps the credentials it was started with only while it runs, for that browser alone.
+- **The journal is per browser.** `/api/activity`, its summary and the NDJSON export only ever
+  return rows written by that same browser.
+- **The engine is per browser.** Job state, cooldown timers, batch progress, the AutoPlayer and the
+  SSE stream all belong to one cookie, so visitors cannot pause, stop or read each other's runs.
+- Sessions are swept after 12 hours of inactivity (timers cleared), and the server caps how many it
+  keeps in memory.
+
+Rows written before this model existed have no owner and are therefore not shown to anyone; the
+Auto player tab's *Developer tools* section shows this browser's journal id, and an operator can
+attach the old rows with
+`sqlite3 data/activity.sqlite "UPDATE activity SET owner='<journal id>' WHERE owner IS NULL"`.
+
 ## ▶️ AutoPlayer — local simulation or real Spotify playback
 
 The **Auto player** tab has two modes, both driven by the queue you already built.

@@ -23,6 +23,14 @@ async function harness() {
   const origin = `http://127.0.0.1:${address.port}`;
   let process: ChildProcess | undefined;
   let output = '';
+  let cookie = '';
+  const withCookie = (headers: Record<string, string> = {}) => (cookie ? { Cookie: cookie, ...headers } : headers);
+  const capture = <T extends { headers: Headers }>(response: T) => {
+    const set = response.headers.get('set-cookie');
+    const match = set ? /sforge_owner=[0-9a-fA-F-]{36}/.exec(set) : null;
+    if (match) cookie = match[0];
+    return response;
+  };
   async function start() {
     process = spawn(globalThis.process.execPath, ['--import', 'tsx', '--import', './tests/lastfm-fixture.mjs', globalThis.process.env.TEST_BUILT_SERVER === 'true' ? 'server.js' : 'server.ts'], {
       cwd: globalThis.process.cwd(), env: { ...globalThis.process.env, PORT: String(address.port), NODE_ENV: 'production', ACTIVITY_DB_PATH: path.join(dir, 'activity.sqlite'), LASTFM_CALL_LOG: path.join(dir, 'lastfm-calls.log'), LASTFM_API_KEY: 'test-key', LASTFM_API_SECRET: 'secret-marker' }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -30,7 +38,7 @@ async function harness() {
     process.stdout?.on('data', chunk => { output += chunk; }); process.stderr?.on('data', chunk => { output += chunk; });
     for (let i = 0; i < 100; i++) {
       if (process.exitCode !== null) throw new Error(`Server exited: ${output}`);
-      try { const response = await fetch(`${origin}/api/job/status`); if (response.ok) return; } catch { /* Wait for this owned child. */ }
+      try { const response = capture(await fetch(`${origin}/api/job/status`, { headers: withCookie() })); if (response.ok) return; } catch { /* Wait for this owned child. */ }
       await delay(30);
     }
     throw new Error(`Server did not become ready: ${output}`);
@@ -39,13 +47,13 @@ async function harness() {
     if (process && process.exitCode === null) { const owned = process; await new Promise<void>(resolve => { owned.once('exit', () => resolve()); owned.kill('SIGTERM'); }); }
     process = undefined;
   }
-  const get = async (route: string) => { const response = await fetch(origin + route); assert.equal(response.status, 200); return response.json(); };
+  const get = async (route: string) => { const response = capture(await fetch(origin + route, { headers: withCookie() })); assert.equal(response.status, 200); return response.json(); };
   const post = async (route: string, body: unknown = {}, headers: Record<string, string> = {}) => {
-    const response = await fetch(origin + route, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    const response = capture(await fetch(origin + route, { method: 'POST', headers: { 'Content-Type': 'application/json', ...withCookie(), ...headers }, body: JSON.stringify(body) }));
     return { status: response.status, headers: response.headers, data: await response.json() };
   };
   await start();
-  return { origin, get, post, dir, restart: async () => { await stop(); await start(); }, close: async () => { await stop(); await rm(dir, { recursive: true, force: true }); } };
+  return { origin, get, post, dir, cookie: () => cookie, headers: withCookie, restart: async () => { await stop(); await start(); }, close: async () => { await stop(); await rm(dir, { recursive: true, force: true }); } };
 }
 
 test('persistent journal records more than 500 events, pages/searches/exports and survives view clearing, new jobs and restart', async () => {
@@ -67,7 +75,7 @@ test('persistent journal records more than 500 events, pages/searches/exports an
     assert.equal(finished.job.scrobblesCompleted, 0); assert.equal(finished.job.simulatedCount, 1); assert.equal(finished.job.lastScrobbleTime, null);
     await app.restart();
     assert.equal((await app.get('/api/activity/summary')).summary.accepted, 260);
-    const response = await fetch(app.origin + '/api/activity/export'); assert.match(response.headers.get('content-type')!, /application\/x-ndjson/);
+    const response = await fetch(app.origin + '/api/activity/export', { headers: app.headers() }); assert.match(response.headers.get('content-type')!, /application\/x-ndjson/);
     const exported = await response.text(); const records = exported.trim().split('\n').map(line => JSON.parse(line));
     assert.ok(records.length > 500); assert.equal(new Set(records.map(record => record.id)).size, records.length);
     for (const secret of ['password-marker', 'secret-marker', 'session-marker', 'test-key']) assert.ok(!exported.includes(secret), `${secret} leaked`);
@@ -77,7 +85,7 @@ test('persistent journal records more than 500 events, pages/searches/exports an
 test('HTTP 429 (including non-JSON) and string code 26 are recorded centrally, with cooldowns and Retry-After', async () => {
   const app = await harness();
   try {
-    const response = await fetch(app.origin + '/api/lastfm/search?track=http-limit&apiKey=test-key');
+    const response = await fetch(app.origin + '/api/lastfm/search?track=http-limit&apiKey=test-key', { headers: app.headers() });
     assert.equal(response.status, 429);
     assert.equal((await response.json()).errorCode, 26);
     let summary = (await app.get('/api/activity/summary')).summary;
@@ -120,7 +128,7 @@ test('ignored tracks, Now Playing failures, daily limit and uncertain outcomes n
     const malformed = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'malformed' }); assert.equal(malformed.data.uncertain, true);
     const network = await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'network-fail' }); assert.equal(network.data.uncertain, true);
     const summary = (await app.get('/api/activity/summary')).summary; assert.equal(summary.accepted, 0); assert.equal(summary.ignored, 1); assert.equal(summary.uncertainRequests, 2); assert.equal(summary.rateLimitHits, 1);
-    const raw = await (await fetch(app.origin + '/api/activity/export')).text(); assert.ok(!raw.includes('secret-marker')); assert.ok(!raw.includes('session-marker'));
+    const raw = await (await fetch(app.origin + '/api/activity/export', { headers: app.headers() })).text(); assert.ok(!raw.includes('secret-marker')); assert.ok(!raw.includes('session-marker'));
   } finally { await app.close(); }
 });
 
@@ -180,7 +188,7 @@ test('duplicate batches are rejected; cancellation retains accepted chunks', asy
 test('profile page rate limits do not silently return a successful empty or partial import', async () => {
   const app = await harness();
   try {
-    const response = await fetch(app.origin + '/api/lastfm/fetch-profile-tracks?apiKey=test-key&username=test-user&limit=10&pages=2');
+    const response = await fetch(app.origin + '/api/lastfm/fetch-profile-tracks?apiKey=test-key&username=test-user&limit=10&pages=2', { headers: app.headers() });
     assert.equal(response.status, 429); assert.equal((await response.json()).ok, false);
     assert.equal((await app.get('/api/activity/summary')).summary.rateLimitHits, 1);
   } finally { await app.close(); }
@@ -194,7 +202,7 @@ test('foreign-Origin mutations, invalid queues and bad timestamps are rejected; 
     assert.equal((await app.post('/api/job/start', { isDryRun: true, queueMode: 'queue_once', queue: [] })).status, 400);
     assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Artist', track: 'accepted', timestamp: Math.floor(Date.now()/1000) + 100 })).status, 400);
     const controller = new AbortController();
-    const response = await fetch(app.origin + '/api/job/events', { signal: controller.signal }); assert.match(response.headers.get('content-type')!, /text\/event-stream/);
+    const response = await fetch(app.origin + '/api/job/events', { signal: controller.signal, headers: app.headers() }); assert.match(response.headers.get('content-type')!, /text\/event-stream/);
     const reader = response.body!.getReader();
     const initial = await reader.read(); assert.match(new TextDecoder().decode(initial.value), /event: status/);
     await app.post('/api/job/start', { artist: 'Artist', track: 'dry', isDryRun: true, limit: 1, interval: 0.5 });
@@ -296,5 +304,49 @@ test('credentials are never reused across visitors and the server exposes no Las
     // And it still works when the caller brings credentials.
     assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Operator', track: 'Own-track' })).status, 200);
     assert.equal(scrobbles(), established + 1);
+  } finally { await app.close(); }
+});
+
+test('the first API response mints an HttpOnly, same-site per-browser session cookie', async () => {
+  const app = await harness();
+  try {
+    const first = await fetch(app.origin + '/api/job/status');
+    const setCookie = first.headers.get('set-cookie') || '';
+    assert.match(setCookie, /sforge_owner=[0-9a-f-]{36}/i);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    const second = await fetch(app.origin + '/api/job/status');
+    assert.notEqual(second.headers.get('set-cookie'), setCookie, 'every browser gets its own identity');
+  } finally { await app.close(); }
+});
+
+test('visitors are isolated: journals, jobs and player state belong to one browser', async () => {
+  const app = await harness();
+  try {
+    const otherOwner = '11111111-2222-3333-4444-555555555555';
+    const asOther = async (route: string, init: RequestInit = {}) => fetch(app.origin + route, { ...init, headers: { Cookie: `sforge_owner=${otherOwner}`, ...(init.headers as Record<string, string> || {}) } });
+
+    assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Operator', track: 'Operator-track' })).status, 200);
+    assert.equal((await app.post('/api/job/start', { artist: 'Operator', track: 'Operator-track', credentials, isDryRun: true, limit: 5, interval: 5, jitter: false })).status, 200);
+    assert.equal((await app.get('/api/activity/summary')).summary.accepted, 1);
+
+    const otherSummary = await (await asOther('/api/activity/summary')).json();
+    assert.equal(otherSummary.summary.accepted, 0);
+    assert.equal(otherSummary.summary.totalEvents, 0);
+    assert.equal((await (await asOther('/api/activity')).json()).logs.length, 0);
+    assert.equal((await (await asOther('/api/activity/export')).text()).trim(), '', 'the other browser exports an empty journal');
+    const otherStatus = await (await asOther('/api/job/status')).json();
+    assert.equal(otherStatus.job.status, 'idle');
+    assert.equal(otherStatus.job.scrobblesCompleted, 0);
+    assert.equal((await asOther('/api/job/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
+    assert.equal((await asOther('/api/job/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 200);
+    assert.equal((await app.get('/api/job/status')).job.status, 'running', 'the operator job is untouched');
+
+    assert.equal((await (await asOther('/api/player/status')).json()).player.sessionId, null);
+    assert.equal((await app.post('/api/player/start', { queue: [{ name: 'local', artist: 'Artist' }], trackDurationSeconds: 1, loopQueue: false })).status, 200);
+    assert.equal((await (await asOther('/api/player/status')).json()).player.status, 'idle');
+
+    await app.post('/api/player/stop');
+    await app.post('/api/job/stop');
   } finally { await app.close(); }
 });

@@ -3,8 +3,18 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { recordActivity, readActivity, activitySummary, exportActivity, saveCheckpoint, loadCheckpoint } from './activity';
+import { activityDb, recordActivity, readActivity, activitySummary, exportActivity, saveCheckpoint, loadCheckpoint } from './activity';
 import type { JobState, PlayerState, QueueTrack, ScrobbleLog } from './src/types';
+
+// Every /api request carries the session minted for its browser cookie.
+declare global {
+  namespace Express {
+    interface Request {
+      owner?: string;
+      forge?: ForgeSession;
+    }
+  }
+}
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,7 +46,6 @@ function generateLastFmSig(params: Record<string, string>, apiSecret: string): s
 class LastFmError extends Error {
   constructor(public status: number, public code: number | undefined, message: string, public retryAfterSeconds = 0, public uncertain = false) { super(message); }
 }
-let cooldownResumeAt: number | null = null;
 function retryAfter(value: string | null) {
   if (!value) return 60;
   const seconds = Number(value);
@@ -48,20 +57,20 @@ function respondError(res: Response, error: unknown) {
   return res.status(e.status).json({ ok: false, error: e.message, errorCode: e.code, retryAfterSeconds: e.retryAfterSeconds, uncertain: e.uncertain });
 }
 // One observable transport for every Last.fm operation. Never persist URLs, bodies, headers or raw responses.
-async function callLastFmApi(params: Record<string, string>, apiSecret?: string, method: 'GET' | 'POST' = 'POST', jobId?: string) {
+async function callLastFmApi(session: ForgeSession, params: Record<string, string>, apiSecret?: string, method: 'GET' | 'POST' = 'POST', jobId?: string) {
   const requestId = crypto.randomUUID();
   const operation = params.method;
   const context: Partial<ScrobbleLog> = { category: 'api', operation, requestId,
     track: params['track[0]'] || params.track, artist: params['artist[0]'] || params.artist,
     jobId };
-  if (cooldownResumeAt && cooldownResumeAt > Date.now()) {
-    const seconds = Math.ceil((cooldownResumeAt - Date.now()) / 1000);
-    addLog('warn', `${operation} deferred during Last.fm cooldown (${seconds}s remaining).`, { ...context, outcome: 'deferred', retryAfterSeconds: seconds });
+  if (session.cooldownResumeAt && session.cooldownResumeAt > Date.now()) {
+    const seconds = Math.ceil((session.cooldownResumeAt - Date.now()) / 1000);
+    session.addLog('warn', `${operation} deferred during Last.fm cooldown (${seconds}s remaining).`, { ...context, outcome: 'deferred', retryAfterSeconds: seconds });
     throw new LastFmError(429, 26, 'Last.fm cooldown is active. Try again after the countdown.', seconds);
   }
   const started = Date.now();
   const attempted = operation === 'track.scrobble' ? Object.keys(params).filter(k => /^track\[\d+\]$/.test(k)).length : 0;
-  addLog('info', `Request started: ${operation}${attempted ? ` (${attempted} tracks)` : ''}.`, { ...context, outcome: 'attempt', attempted });
+  session.addLog('info', `Request started: ${operation}${attempted ? ` (${attempted} tracks)` : ''}.`, { ...context, outcome: 'attempt', attempted });
   const requestParams = { ...params };
   if (apiSecret) requestParams.api_sig = generateLastFmSig(requestParams, apiSecret);
   requestParams.format = 'json';
@@ -82,7 +91,7 @@ async function callLastFmApi(params: Record<string, string>, apiSecret?: string,
     const code = data.error === undefined ? undefined : Number(data.error);
     if (res.status === 429 || code === 26) {
       const seconds = retryAfter(res.headers.get('retry-after'));
-      cooldownResumeAt = Math.max(cooldownResumeAt || 0, Date.now() + seconds * 1000);
+      session.cooldownResumeAt = Math.max(session.cooldownResumeAt || 0, Date.now() + seconds * 1000);
       throw new LastFmError(429, code || 26, 'Last.fm request rate limit reached.', seconds);
     }
     if (!res.ok || code) {
@@ -103,301 +112,306 @@ async function callLastFmApi(params: Record<string, string>, apiSecret?: string,
         const ignoredCode = Number(entry.ignoredMessage?.code);
         if (ignoredCode === 5) dailyLimited = true;
         const reasons: Record<number, string> = { 1: 'Artist was ignored', 2: 'Track was ignored', 3: 'Timestamp is too old', 4: 'Timestamp is in the future', 5: 'Daily scrobble limit exceeded' };
-        addLog(ignoredCode === 5 ? 'rate_limit' : ignoredCode ? 'warn' : 'success', ignoredCode ? `Track ignored: ${reasons[ignoredCode] || `reason ${ignoredCode}`}.` : 'Track confirmed accepted by Last.fm.', {
+        session.addLog(ignoredCode === 5 ? 'rate_limit' : ignoredCode ? 'warn' : 'success', ignoredCode ? `Track ignored: ${reasons[ignoredCode] || `reason ${ignoredCode}`}.` : 'Track confirmed accepted by Last.fm.', {
           ...context, track: params[`track[${index}]`], artist: params[`artist[${index}]`], outcome: ignoredCode === 5 ? 'rate_limited' : undefined, errorCode: ignoredCode || undefined, scrobbleTimestamp: Number(params[`timestamp[${index}]`]),
         });
       });
     }
     if (operation === 'track.updateNowPlaying' && !data.nowplaying) throw new LastFmError(502, undefined, 'Last.fm did not confirm Now Playing.');
     if (operation === 'track.updateNowPlaying' && Number(data.nowplaying.ignoredMessage?.code || 0) !== 0) throw new LastFmError(422, Number(data.nowplaying.ignoredMessage.code), 'Last.fm ignored the Now Playing update.');
-    addLog(ignored ? 'warn' : 'success', operation === 'track.scrobble' ? `Last.fm confirmed ${accepted} accepted, ${ignored} ignored.` : `Request completed: ${operation}.`, {
+    session.addLog(ignored ? 'warn' : 'success', operation === 'track.scrobble' ? `Last.fm confirmed ${accepted} accepted, ${ignored} ignored.` : `Request completed: ${operation}.`, {
       ...context, outcome: accepted ? 'accepted' : ignored ? 'ignored' : 'success', accepted, ignored, attempted, httpStatus: res.status, durationMs: Date.now() - started,
     });
     return { status: res.status, ok: true, data, accepted, ignored, dailyLimited };
   } catch (error) {
     const e = error instanceof LastFmError ? error : new LastFmError(502, undefined, 'Last.fm connection failed or timed out. Submission may be uncertain.', 0, method === 'POST');
-    addLog(e.status === 429 || e.code === 29 ? 'rate_limit' : 'error', e.message, { ...context, outcome: e.status === 429 || e.code === 29 ? 'rate_limited' : e.uncertain ? 'uncertain' : 'failed', httpStatus: upstreamStatus, errorCode: e.code, retryAfterSeconds: e.retryAfterSeconds || undefined, durationMs: Date.now() - started });
+    session.addLog(e.status === 429 || e.code === 29 ? 'rate_limit' : 'error', e.message, { ...context, outcome: e.status === 429 || e.code === 29 ? 'rate_limited' : e.uncertain ? 'uncertain' : 'failed', httpStatus: upstreamStatus, errorCode: e.code, retryAfterSeconds: e.retryAfterSeconds || undefined, durationMs: Date.now() - started });
     throw e;
   }
 }
 
-let activeJob: JobState = {
-  jobId: crypto.randomUUID(),
-  ignoredCount: 0,
-  simulatedCount: 0,
-  status: 'idle',
-  artist: 'rvaia',
-  track: 'kill bill',
-  album: 'kill bill',
-  limit: 1800,
-  interval: 2,
-  jitter: true,
-  isDryRun: false,
-  mode: 'live',
-  queueMode: 'single_loop',
-  queue: [],
-  currentQueueIndex: 0,
-  scrobblesCompleted: 0,
-  failedCount: 0,
-  startedAt: null,
-  lastScrobbleTime: null,
-  rateLimitCooldownSeconds: 0,
-  rateLimitResumeAt: null,
-  currentError: null,
-  logs: [],
-};
+const DEFAULT_JOB = (): JobState => ({
+  jobId: crypto.randomUUID(), ignoredCount: 0, simulatedCount: 0, status: 'idle',
+  artist: 'rvaia', track: 'kill bill', album: 'kill bill', limit: 1800, interval: 2, jitter: true,
+  isDryRun: false, mode: 'live', queueMode: 'single_loop', queue: [], currentQueueIndex: 0,
+  scrobblesCompleted: 0, failedCount: 0, startedAt: null, lastScrobbleTime: null,
+  rateLimitCooldownSeconds: 0, rateLimitResumeAt: null, currentError: null, logs: [],
+});
 
-// Store clients for SSE real-time notifications
-const sseClients: Response[] = [];
-
-function emitSSE(event: string, data: any) {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (let i = sseClients.length - 1; i >= 0; i--) {
-    try {
-      sseClients[i].write(payload);
-    } catch {
-      sseClients.splice(i, 1);
-    }
-  }
-}
-
-function addLog(
-  level: ScrobbleLog['level'],
-  message: string,
-  extra?: Partial<ScrobbleLog>
-) {
-  const log = recordActivity(level, message, { jobId: extra?.category === 'api' ? undefined : activeJob.jobId, ...extra });
-  activeJob.logs.push(log);
-  if (activeJob.logs.length > 100) activeJob.logs.shift();
-  saveCheckpoint({ ...activeJob, cooldownResumeAt, logs: [] });
-  emitSSE('log', log);
-  emitSSE('status', getJobStatusPayload());
-}
-
-function getJobStatusPayload() {
-  return {
-    ...activeJob,
-    logs: activeJob.logs.slice(-100),
-    cooldownResumeAt,
-  };
-}
-
-const restored = loadCheckpoint() as (JobState & { cooldownResumeAt?: number | null }) | null;
-if (restored) {
-  cooldownResumeAt = restored.cooldownResumeAt || null;
-  activeJob = { ...activeJob, ...restored, logs: readActivity({ limit: 100 }).logs };
-  if (['running', 'rate_limited'].includes(activeJob.status)) {
-    activeJob.status = 'paused';
-    addLog('warn', 'Server restarted. Previous progress restored and paused; confirm before resuming. An in-flight submission may be uncertain.', { category: 'system' });
-  }
-}
-
-let jobTimeoutHandle: NodeJS.Timeout | null = null;
-let inFlight = false;
-
-// Credentials supplied with a job start; used only by that job's worker.
-let jobCredentials: {
-  apiKey: string;
-  apiSecret: string;
-  sessionKey: string;
-  username: string;
-} | null = null;
-
-async function executeScrobbleStep() {
-  if (activeJob.status !== 'running' || inFlight) return;
-  const executingJob = activeJob;
-
-  const isQueueMode = activeJob.queue.length > 0 && activeJob.queueMode !== 'single_loop';
-
-  // Check completion limit
-  if (activeJob.scrobblesCompleted + (activeJob.ignoredCount || 0) + (activeJob.simulatedCount || 0) >= activeJob.limit) {
-    activeJob.status = 'completed';
-    addLog(
-      'success',
-      `Job finished: ${activeJob.scrobblesCompleted} accepted, ${activeJob.ignoredCount || 0} ignored, ${activeJob.simulatedCount || 0} simulated.`
-    );
-    emitSSE('completed', getJobStatusPayload());
-    return;
-  }
-
-  // Check if queue_once completed
-  if (isQueueMode && activeJob.queueMode === 'queue_once' && activeJob.currentQueueIndex >= activeJob.queue.length) {
-    activeJob.status = 'completed';
-    addLog(
-      'success',
-      `🎉 Full queue completed! Finished all ${activeJob.queue.length} tracks.`
-    );
-    emitSSE('completed', getJobStatusPayload());
-    return;
-  }
-
-  let currentArtist = activeJob.artist;
-  let currentTrackName = activeJob.track;
-  let currentAlbum = activeJob.album;
-
-  if (isQueueMode) {
-    const trackItem = activeJob.queue[activeJob.currentQueueIndex];
-    if (trackItem) {
-      currentArtist = trackItem.artist;
-      currentTrackName = trackItem.name;
-      currentAlbum = trackItem.album || '';
-    }
-  }
-
-  const currentCount = activeJob.scrobblesCompleted + (activeJob.ignoredCount || 0) + (activeJob.simulatedCount || 0) + 1;
-  const targetLimit = activeJob.limit;
-
-  // Handle dry-run mode
-  if (activeJob.isDryRun) {
-    activeJob.simulatedCount = (activeJob.simulatedCount || 0) + 1;
-
-    addLog(
-      'info',
-      `[DRY RUN] Simulated scrobble for "${currentTrackName}" by ${currentArtist} (${currentCount}/${targetLimit})`,
-      { artist: currentArtist, track: currentTrackName, album: currentAlbum, count: currentCount, total: targetLimit, outcome: 'simulated' }
-    );
-    advanceQueueIndex();
-    saveCheckpoint({ ...activeJob, cooldownResumeAt, logs: [] });
-    scheduleNextStep();
-    return;
-  }
-
-  if (!jobCredentials || !jobCredentials.sessionKey) {
-    activeJob.status = 'error';
-    activeJob.currentError = 'Missing Last.fm authentication session.';
-    addLog('error', 'Authentication failed: No valid Last.fm session key.');
-    return;
-  }
-
-  try {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const params: Record<string, string> = {
-      method: 'track.scrobble',
-      api_key: jobCredentials.apiKey,
-      sk: jobCredentials.sessionKey,
-      'artist[0]': currentArtist,
-      'track[0]': currentTrackName,
-      'timestamp[0]': timestamp.toString(),
-    };
-    if (currentAlbum) {
-      params['album[0]'] = currentAlbum;
-    }
-
-    inFlight = true;
-    const response = await callLastFmApi(
-      params,
-      jobCredentials.apiSecret,
-      'POST',
-      executingJob.jobId
-    );
-
-    if (activeJob !== executingJob) return;
-    activeJob.scrobblesCompleted += response.accepted;
-    activeJob.ignoredCount = (activeJob.ignoredCount || 0) + response.ignored;
-    if (response.accepted) activeJob.lastScrobbleTime = Date.now();
-    addLog(response.accepted ? 'success' : 'warn', response.accepted ? `Scrobbled "${currentTrackName}" by ${currentArtist}.` : `Last.fm ignored "${currentTrackName}"; queue advanced without adding to accepted count.`,
-      { artist: currentArtist, track: currentTrackName, album: currentAlbum, count: activeJob.scrobblesCompleted, total: targetLimit });
-
-    advanceQueueIndex();
-    if (response.dailyLimited) { activeJob.status = 'error'; activeJob.currentError = 'Last.fm daily scrobble limit reached. Stop and wait before submitting more.'; addLog('error', activeJob.currentError); }
-    scheduleNextStep();
-  } catch (err) {
-    if (activeJob !== executingJob) return;
-    if (err instanceof LastFmError && err.status === 429) {
-      activeJob.rateLimitResumeAt = cooldownResumeAt;
-      activeJob.rateLimitCooldownSeconds = err.retryAfterSeconds;
-      if (activeJob.status === 'running') {
-        activeJob.status = 'rate_limited';
-        scheduleCooldown();
-      }
-      addLog('warn', 'Worker is waiting for the recorded Last.fm cooldown; this track was not accepted.');
-    } else {
-      activeJob.failedCount += 1;
-      if (activeJob.status === 'running') activeJob.status = 'error';
-      activeJob.currentError = err instanceof LastFmError ? err.message : 'Scrobble failed.';
-      addLog('error', activeJob.currentError);
-    }
-  } finally {
-    inFlight = false;
-    saveCheckpoint({ ...activeJob, cooldownResumeAt, logs: [] });
-    emitSSE('status', getJobStatusPayload());
-  }
-}
-
-function scheduleCooldown() {
-  if (jobTimeoutHandle) clearTimeout(jobTimeoutHandle);
-  jobTimeoutHandle = setTimeout(() => {
-    if (activeJob.status !== 'rate_limited') return;
-    if (cooldownResumeAt && cooldownResumeAt > Date.now()) { scheduleCooldown(); return; }
-    activeJob.status = 'running';
-    activeJob.rateLimitResumeAt = null;
-    activeJob.rateLimitCooldownSeconds = 0;
-    addLog('info', 'Cooldown completed. Resuming the unaccepted track.');
-    void executeScrobbleStep();
-  }, Math.max(1, (cooldownResumeAt || Date.now()) - Date.now()));
-}
-
-function advanceQueueIndex() {
-  if (activeJob.queue.length > 0 && activeJob.queueMode !== 'single_loop') {
-    activeJob.currentQueueIndex += 1;
-    if (activeJob.currentQueueIndex >= activeJob.queue.length) {
-      if (activeJob.queueMode === 'queue_loop') {
-        activeJob.currentQueueIndex = 0; // wrap around
-      }
-    }
-  }
-}
-
-function scheduleNextStep() {
-  if (activeJob.status !== 'running') return;
-
-  let delay = activeJob.interval * 1000;
-  if (activeJob.jitter) {
-    // Add jitter between -500ms and +500ms, ensuring delay is at least 500ms
-    const jitterMs = (Math.random() - 0.5) * 1000;
-    delay = Math.max(500, delay + jitterMs);
-  }
-
-  jobTimeoutHandle = setTimeout(() => {
-    executeScrobbleStep();
-  }, delay);
-}
-
-// ---------------------------------------------------------------------------
-// AutoPlayer — real-time local playback simulation.
-// This mode contains no Last.fm API calls: it needs no credentials, performs no
-// metadata lookups, submits no scrobbles and ignores cooldowns/limits. It simply
-// advances a queue on a wall-clock schedule while every completed play is journaled
-// locally (category 'player', outcome 'played').
-// ---------------------------------------------------------------------------
-const autoplayer: PlayerState = {
+const DEFAULT_PLAYER = (): PlayerState => ({
   apiFree: true, sessionId: null, status: 'idle', queue: [], currentIndex: 0, activeTrack: null,
   trackDurationSeconds: 30, remainingMs: 0, loopQueue: true, shuffle: false, playsCompleted: 0,
   trackStartedAt: null, trackEndsAt: null, lastPlayAt: null, startedAt: null, stoppedReason: null,
-};
-let playerTimeoutHandle: NodeJS.Timeout | null = null;
+});
 
-const playerStatusPayload = () => ({ ...autoplayer, activeTrack: autoplayer.activeTrack ? { ...autoplayer.activeTrack } : null });
-const emitPlayerState = () => emitSSE('player', playerStatusPayload());
+interface SessionCredentials { apiKey: string; apiSecret: string; sessionKey: string; username: string; }
 
-function clearPlayerTimer() {
-  if (playerTimeoutHandle) { clearTimeout(playerTimeoutHandle); playerTimeoutHandle = null; }
-}
+// Public deployment: every visitor gets an isolated session. Credentials, job state, player state,
+// journal rows and SSE streams live on this object and are never shared with another visitor.
+class ForgeSession {
+  readonly owner: string;
+  lastSeen = Date.now();
+  credentials: SessionCredentials | null = null;
+  cooldownResumeAt: number | null = null;
+  job: JobState = DEFAULT_JOB();
+  jobTimeout: NodeJS.Timeout | null = null;
+  inFlight = false;
+  instantRunning = false;
+  batchRunning = false;
+  batchCancel = false;
+  batchProgress = { id: '', total: 0, accepted: 0, ignored: 0, status: 'idle' };
+  sse: Response[] = [];
+  player: PlayerState = DEFAULT_PLAYER();
+  playerTimeout: NodeJS.Timeout | null = null;
 
-function stopPlayer(reason: string, status: PlayerState['status'] = 'idle') {
-  clearPlayerTimer();
-  autoplayer.status = status;
-  autoplayer.activeTrack = null;
-  autoplayer.trackStartedAt = null;
-  autoplayer.trackEndsAt = null;
-  autoplayer.remainingMs = 0;
-  autoplayer.stoppedReason = reason;
-  emitPlayerState();
-}
+  constructor(owner: string) {
+    this.owner = owner;
+    const restored = loadCheckpoint(owner) as (JobState & { cooldownResumeAt?: number | null }) | null;
+    if (restored) {
+      this.cooldownResumeAt = restored.cooldownResumeAt || null;
+      this.job = { ...this.job, ...restored, logs: readActivity(owner, { limit: 100 }).logs };
+      if (['running', 'rate_limited'].includes(this.job.status)) {
+        this.job.status = 'paused';
+        this.addLog('warn', 'Server restarted. Previous progress restored and paused; confirm before resuming. An in-flight submission may be uncertain.', { category: 'system' });
+      }
+    }
+  }
 
-function schedulePlayerStep(ms: number) {
-  clearPlayerTimer();
-  playerTimeoutHandle = setTimeout(completePlay, Math.max(25, ms));
+  touch() { this.lastSeen = Date.now(); }
+
+  addLog(level: ScrobbleLog['level'], message: string, extra?: Partial<ScrobbleLog>) {
+    const log = recordActivity(this.owner, level, message, { jobId: extra?.category === 'api' ? undefined : this.job.jobId, ...extra });
+    this.job.logs.push(log);
+    if (this.job.logs.length > 100) this.job.logs.shift();
+    saveCheckpoint(this.owner, { ...this.job, cooldownResumeAt: this.cooldownResumeAt, logs: [] });
+    this.emitSSE('log', log);
+    this.emitSSE('status', this.jobStatusPayload());
+  }
+
+  jobStatusPayload() {
+    return { ...this.job, logs: this.job.logs.slice(-100), cooldownResumeAt: this.cooldownResumeAt };
+  }
+
+  emitSSE(event: string, data: any) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (let i = this.sse.length - 1; i >= 0; i--) {
+      try { this.sse[i].write(payload); } catch { this.sse.splice(i, 1); }
+    }
+  }
+
+  async executeScrobbleStep() {
+    if (this.job.status !== 'running' || this.inFlight) return;
+    const executingJob = this.job;
+    const isQueueMode = this.job.queue.length > 0 && this.job.queueMode !== 'single_loop';
+
+    if (this.job.scrobblesCompleted + (this.job.ignoredCount || 0) + (this.job.simulatedCount || 0) >= this.job.limit) {
+      this.job.status = 'completed';
+      this.addLog('success', `Job finished: ${this.job.scrobblesCompleted} accepted, ${this.job.ignoredCount || 0} ignored, ${this.job.simulatedCount || 0} simulated.`);
+      this.emitSSE('completed', this.jobStatusPayload());
+      return;
+    }
+
+    if (isQueueMode && this.job.queueMode === 'queue_once' && this.job.currentQueueIndex >= this.job.queue.length) {
+      this.job.status = 'completed';
+      this.addLog('success', `🎉 Full queue completed! Finished all ${this.job.queue.length} tracks.`);
+      this.emitSSE('completed', this.jobStatusPayload());
+      return;
+    }
+
+    let currentArtist = this.job.artist;
+    let currentTrackName = this.job.track;
+    let currentAlbum = this.job.album;
+
+    if (isQueueMode) {
+      const trackItem = this.job.queue[this.job.currentQueueIndex];
+      if (trackItem) {
+        currentArtist = trackItem.artist;
+        currentTrackName = trackItem.name;
+        currentAlbum = trackItem.album || '';
+      }
+    }
+
+    const currentCount = this.job.scrobblesCompleted + (this.job.ignoredCount || 0) + (this.job.simulatedCount || 0) + 1;
+    const targetLimit = this.job.limit;
+
+    if (this.job.isDryRun) {
+      this.job.simulatedCount = (this.job.simulatedCount || 0) + 1;
+      this.addLog('info', `[DRY RUN] Simulated scrobble for "${currentTrackName}" by ${currentArtist} (${currentCount}/${targetLimit})`,
+        { artist: currentArtist, track: currentTrackName, album: currentAlbum, count: currentCount, total: targetLimit, outcome: 'simulated' });
+      this.advanceQueueIndex();
+      saveCheckpoint(this.owner, { ...this.job, cooldownResumeAt: this.cooldownResumeAt, logs: [] });
+      this.scheduleNextStep();
+      return;
+    }
+
+    if (!this.credentials || !this.credentials.sessionKey) {
+      this.job.status = 'error';
+      this.job.currentError = 'Missing Last.fm authentication session.';
+      this.addLog('error', 'Authentication failed: No valid Last.fm session key.');
+      return;
+    }
+
+    try {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const params: Record<string, string> = {
+        method: 'track.scrobble',
+        api_key: this.credentials.apiKey,
+        sk: this.credentials.sessionKey,
+        'artist[0]': currentArtist,
+        'track[0]': currentTrackName,
+        'timestamp[0]': timestamp.toString(),
+      };
+      if (currentAlbum) params['album[0]'] = currentAlbum;
+
+      this.inFlight = true;
+      const response = await callLastFmApi(this, params, this.credentials.apiSecret, 'POST', executingJob.jobId);
+      if (this.job !== executingJob) return;
+
+      this.job.scrobblesCompleted += response.accepted;
+      this.job.ignoredCount = (this.job.ignoredCount || 0) + response.ignored;
+      if (response.accepted) this.job.lastScrobbleTime = Date.now();
+      this.addLog(response.accepted ? 'success' : 'warn', response.accepted ? `Scrobbled "${currentTrackName}" by ${currentArtist}.` : `Last.fm ignored "${currentTrackName}"; queue advanced without adding to accepted count.`,
+        { artist: currentArtist, track: currentTrackName, album: currentAlbum, count: this.job.scrobblesCompleted, total: targetLimit });
+
+      this.advanceQueueIndex();
+      if (response.dailyLimited) { this.job.status = 'error'; this.job.currentError = 'Last.fm daily scrobble limit reached. Stop and wait before submitting more.'; this.addLog('error', this.job.currentError); }
+      this.scheduleNextStep();
+    } catch (err) {
+      if (this.job !== executingJob) return;
+      if (err instanceof LastFmError && err.status === 429) {
+        this.job.rateLimitResumeAt = this.cooldownResumeAt;
+        this.job.rateLimitCooldownSeconds = err.retryAfterSeconds;
+        if (this.job.status === 'running') {
+          this.job.status = 'rate_limited';
+          this.scheduleCooldown();
+        }
+        this.addLog('warn', 'Worker is waiting for the recorded Last.fm cooldown; this track was not accepted.');
+      } else {
+        this.job.failedCount += 1;
+        if (this.job.status === 'running') this.job.status = 'error';
+        this.job.currentError = err instanceof LastFmError ? err.message : 'Scrobble failed.';
+        this.addLog('error', this.job.currentError);
+      }
+    } finally {
+      this.inFlight = false;
+      saveCheckpoint(this.owner, { ...this.job, cooldownResumeAt: this.cooldownResumeAt, logs: [] });
+      this.emitSSE('status', this.jobStatusPayload());
+    }
+  }
+
+  scheduleCooldown() {
+    if (this.jobTimeout) clearTimeout(this.jobTimeout);
+    this.jobTimeout = setTimeout(() => {
+      if (this.job.status !== 'rate_limited') return;
+      if (this.cooldownResumeAt && this.cooldownResumeAt > Date.now()) { this.scheduleCooldown(); return; }
+      this.job.status = 'running';
+      this.job.rateLimitResumeAt = null;
+      this.job.rateLimitCooldownSeconds = 0;
+      this.addLog('info', 'Cooldown completed. Resuming the unaccepted track.');
+      void this.executeScrobbleStep();
+    }, Math.max(1, (this.cooldownResumeAt || Date.now()) - Date.now()));
+  }
+
+  advanceQueueIndex() {
+    if (this.job.queue.length > 0 && this.job.queueMode !== 'single_loop') {
+      this.job.currentQueueIndex += 1;
+      if (this.job.currentQueueIndex >= this.job.queue.length) {
+        if (this.job.queueMode === 'queue_loop') {
+          this.job.currentQueueIndex = 0; // wrap around
+        }
+      }
+    }
+  }
+
+  scheduleNextStep() {
+    if (this.job.status !== 'running') return;
+    let delay = this.job.interval * 1000;
+    if (this.job.jitter) {
+      const jitterMs = (Math.random() - 0.5) * 1000;
+      delay = Math.max(500, delay + jitterMs);
+    }
+    this.jobTimeout = setTimeout(() => { void this.executeScrobbleStep(); }, delay);
+  }
+
+  // --- AutoPlayer: local playback journaling, still scoped to this visitor. ---
+  playerStatusPayload() { return { ...this.player, activeTrack: this.player.activeTrack ? { ...this.player.activeTrack } : null }; }
+  emitPlayerState() { this.emitSSE('player', this.playerStatusPayload()); }
+  clearPlayerTimer() { if (this.playerTimeout) { clearTimeout(this.playerTimeout); this.playerTimeout = null; } }
+
+  stopPlayer(reason: string, status: PlayerState['status'] = 'idle') {
+    this.clearPlayerTimer();
+    this.player.status = status;
+    this.player.activeTrack = null;
+    this.player.trackStartedAt = null;
+    this.player.trackEndsAt = null;
+    this.player.remainingMs = 0;
+    this.player.stoppedReason = reason;
+    this.emitPlayerState();
+  }
+
+  schedulePlayerStep(ms: number) {
+    this.clearPlayerTimer();
+    this.playerTimeout = setTimeout(() => this.completePlay(), Math.max(25, ms));
+  }
+
+  startPlay() {
+    if (this.player.status !== 'playing') return;
+    if (!this.player.queue.length) { this.stopPlayer('The queue is empty.', 'completed'); return; }
+    if (this.player.currentIndex >= this.player.queue.length) {
+      if (!this.player.loopQueue) { this.stopPlayer(`Queue finished after ${this.player.playsCompleted} tracked plays.`, 'completed'); return; }
+      this.player.currentIndex = 0;
+    }
+    const track = this.player.queue[this.player.currentIndex];
+    this.player.remainingMs = this.player.trackDurationSeconds * 1000;
+    this.player.activeTrack = track;
+    this.player.trackStartedAt = Date.now();
+    this.player.trackEndsAt = this.player.trackStartedAt + this.player.remainingMs;
+    this.player.stoppedReason = null;
+    this.emitPlayerState();
+    this.schedulePlayerStep(this.player.remainingMs);
+  }
+
+  completePlay() {
+    if (this.player.status !== 'playing' || !this.player.activeTrack) return;
+    const track = this.player.activeTrack;
+    const durationMs = this.player.trackStartedAt ? Date.now() - this.player.trackStartedAt : this.player.trackDurationSeconds * 1000;
+    this.player.playsCompleted += 1;
+    this.player.lastPlayAt = Date.now();
+    recordActivity(this.owner, 'info', `AutoPlayer completed play ${this.player.playsCompleted}: "${track.name}" by ${track.artist}. Tracked locally - no Last.fm API call was made.`, {
+      category: 'player', track: track.name, artist: track.artist, album: track.album,
+      outcome: 'played', count: this.player.playsCompleted, total: this.player.queue.length,
+      jobId: this.player.sessionId || undefined, durationMs,
+    });
+    this.player.currentIndex += 1;
+    this.player.activeTrack = null;
+    this.emitPlayerState();
+    this.startPlay();
+  }
+
+  pausePlayer() {
+    if (this.player.status !== 'playing') return false;
+    this.clearPlayerTimer();
+    this.player.remainingMs = this.player.trackEndsAt ? Math.max(25, this.player.trackEndsAt - Date.now()) : this.player.remainingMs;
+    this.player.status = 'paused';
+    this.emitPlayerState();
+    return true;
+  }
+
+  resumePlayer() {
+    if (this.player.status !== 'paused') return false;
+    this.player.status = 'playing';
+    this.player.trackEndsAt = Date.now() + this.player.remainingMs;
+    this.emitPlayerState();
+    this.schedulePlayerStep(this.player.remainingMs);
+    return true;
+  }
+
+  dispose() {
+    if (this.jobTimeout) { clearTimeout(this.jobTimeout); this.jobTimeout = null; }
+    if (this.playerTimeout) { clearTimeout(this.playerTimeout); this.playerTimeout = null; }
+    for (const response of this.sse) { try { response.end(); } catch { /* already closed */ } }
+    this.sse = [];
+  }
 }
 
 function shuffled<T>(items: T[]): T[] {
@@ -405,97 +419,97 @@ function shuffled<T>(items: T[]): T[] {
   return items;
 }
 
-function startPlay() {
-  if (autoplayer.status !== 'playing') return;
-  if (!autoplayer.queue.length) { stopPlayer('The queue is empty.', 'completed'); return; }
-  if (autoplayer.currentIndex >= autoplayer.queue.length) {
-    if (!autoplayer.loopQueue) { stopPlayer(`Queue finished after ${autoplayer.playsCompleted} tracked plays.`, 'completed'); return; }
-    autoplayer.currentIndex = 0;
+const SESSION_COOKIE = 'sforge_owner';
+const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
+const MAX_SESSIONS = 400;
+const sessions = new Map<string, ForgeSession>();
+
+function readSessionCookie(header: string | undefined): string | null {
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [name, ...rest] = part.trim().split('=');
+    if (name === SESSION_COOKIE) return rest.join('=');
   }
-  const track = autoplayer.queue[autoplayer.currentIndex];
-  autoplayer.remainingMs = autoplayer.trackDurationSeconds * 1000;
-  autoplayer.activeTrack = track;
-  autoplayer.trackStartedAt = Date.now();
-  autoplayer.trackEndsAt = autoplayer.trackStartedAt + autoplayer.remainingMs;
-  autoplayer.stoppedReason = null;
-  emitPlayerState();
-  schedulePlayerStep(autoplayer.remainingMs);
+  return null;
 }
 
-function completePlay() {
-  if (autoplayer.status !== 'playing' || !autoplayer.activeTrack) return;
-  const track = autoplayer.activeTrack;
-  const durationMs = autoplayer.trackStartedAt ? Date.now() - autoplayer.trackStartedAt : autoplayer.trackDurationSeconds * 1000;
-  autoplayer.playsCompleted += 1;
-  autoplayer.lastPlayAt = Date.now();
-  recordActivity('info', `AutoPlayer completed play ${autoplayer.playsCompleted}: "${track.name}" by ${track.artist}. Tracked locally - no Last.fm API call was made.`, {
-    category: 'player', track: track.name, artist: track.artist, album: track.album,
-    outcome: 'played', count: autoplayer.playsCompleted, total: autoplayer.queue.length,
-    jobId: autoplayer.sessionId || undefined, durationMs,
-  });
-  autoplayer.currentIndex += 1;
-  autoplayer.activeTrack = null;
-  emitPlayerState();
-  startPlay();
+// First API response mints a per-browser identity; every later request carries it automatically.
+function ensureSessionOwner(req: Request, res: Response): string {
+  const existing = readSessionCookie(req.headers.cookie);
+  if (existing && /^[0-9a-fA-F-]{36}$/.test(existing)) return existing;
+  const owner = crypto.randomUUID();
+  res.append('Set-Cookie', `${SESSION_COOKIE}=${owner}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly`);
+  return owner;
 }
 
-function pausePlayer() {
-  if (autoplayer.status !== 'playing') return false;
-  clearPlayerTimer();
-  autoplayer.remainingMs = autoplayer.trackEndsAt ? Math.max(25, autoplayer.trackEndsAt - Date.now()) : autoplayer.remainingMs;
-  autoplayer.status = 'paused';
-  emitPlayerState();
-  return true;
+function getSession(owner: string): ForgeSession {
+  const existing = sessions.get(owner);
+  if (existing) { existing.touch(); return existing; }
+  const session = new ForgeSession(owner);
+  sessions.set(owner, session);
+  return session;
 }
 
-function resumePlayer() {
-  if (autoplayer.status !== 'paused') return false;
-  autoplayer.status = 'playing';
-  autoplayer.trackEndsAt = Date.now() + autoplayer.remainingMs;
-  emitPlayerState();
-  schedulePlayerStep(autoplayer.remainingMs);
-  return true;
+function sweepSessions() {
+  const cutoff = Date.now() - SESSION_IDLE_MS;
+  for (const [owner, session] of sessions) {
+    if (session.lastSeen < cutoff || sessions.size > MAX_SESSIONS) {
+      if (session.lastSeen >= cutoff && sessions.size <= MAX_SESSIONS) continue;
+      session.dispose();
+      sessions.delete(owner);
+    }
+  }
 }
 
-// Single-operator application: mutations must originate from the current UI.
+// Public deployment: each visitor is isolated behind an HttpOnly cookie minted on the first API
+// response. Credentials, job/player state, journal rows and SSE streams all belong to that browser.
 app.use('/api', (req, res, next) => {
   res.setHeader('Cache-Control', 'private, no-store');
+  const owner = ensureSessionOwner(req, res);
+  req.owner = owner;
+  req.forge = getSession(owner);
+  if (sessions.size > 100) sweepSessions();
   if (req.method !== 'GET' && req.headers.origin) {
     const protocol = req.headers['x-forwarded-proto'] === 'https' ? 'https' : req.protocol;
-    if (req.headers.origin !== `${protocol}://${req.get('host')}`) { addLog('warn', 'Cross-origin API mutation refused.', { category: 'system', httpStatus: 403 }); return res.status(403).json({ ok: false, error: 'Cross-origin mutation refused.' }); }
+    if (req.headers.origin !== `${protocol}://${req.get('host')}`) { req.forge.addLog('warn', 'Cross-origin API mutation refused.', { category: 'system', httpStatus: 403 }); return res.status(403).json({ ok: false, error: 'Cross-origin mutation refused.' }); }
   }
   if (!req.path.startsWith('/activity') && req.path !== '/job/events') {
     res.on('finish', () => {
-      if (res.statusCode >= 400 && res.statusCode !== 429) addLog('warn', `API request rejected (HTTP ${res.statusCode}).`, { category: 'system', httpStatus: res.statusCode });
+      if (res.statusCode >= 400 && res.statusCode !== 429) req.forge!.addLog('warn', `API request rejected (HTTP ${res.statusCode}).`, { category: 'system', httpStatus: res.statusCode });
     });
   }
   if (['/lastfm/single-scrobble', '/lastfm/now-playing'].includes(req.path) && req.method === 'POST') {
     if (typeof req.body.artist !== 'string' || !req.body.artist.trim() || typeof req.body.track !== 'string' || !req.body.track.trim()) return res.status(400).json({ ok: false, error: 'Artist and track are required.' });
     if (req.path.endsWith('single-scrobble') && req.body.timestamp !== undefined && (!Number.isInteger(Number(req.body.timestamp)) || Number(req.body.timestamp) > Math.floor(Date.now()/1000) || Number(req.body.timestamp) < Math.floor(Date.now()/1000) - 14 * 86400)) return res.status(400).json({ ok: false, error: 'Timestamp must be within the past 14 days.' });
-    if (instantRunning || batchRunning || inFlight || ['running', 'rate_limited', 'paused'].includes(activeJob.status)) return res.status(409).json({ ok: false, error: 'Stop the active worker before submitting an instant action.' });
-    instantRunning = true;
+    if (req.forge.instantRunning || req.forge.batchRunning || req.forge.inFlight || ['running', 'rate_limited', 'paused'].includes(req.forge.job.status)) return res.status(409).json({ ok: false, error: 'Stop the active worker before submitting an instant action.' });
+    req.forge.instantRunning = true;
   }
   next();
 });
-app.get('/api/activity', (req, res) => res.json({ ok: true, ...readActivity({ before: Number(req.query.before) || undefined, after: Number(req.query.after) || undefined, limit: Number(req.query.limit) || 100, level: String(req.query.level || 'all'), search: String(req.query.search || '') }) }));
-app.get('/api/activity/summary', (_req, res) => res.json({ ok: true, summary: { ...activitySummary(), cooldownResumeAt } }));
-app.get('/api/activity/export', async (_req, res) => {
+
+app.get('/api/identity', (req, res) => {
+  const legacy = activityDb.prepare('SELECT COUNT(*) count FROM activity WHERE owner IS NULL').get() as { count?: number } | undefined;
+  return res.json({ ok: true, owner: req.forge!.owner, legacyRows: Number(legacy?.count || 0) });
+});
+app.get('/api/activity', (req, res) => res.json({ ok: true, ...readActivity(req.forge!.owner, { before: Number(req.query.before) || undefined, after: Number(req.query.after) || undefined, limit: Number(req.query.limit) || 100, level: String(req.query.level || 'all'), search: String(req.query.search || '') }) }));
+app.get('/api/activity/summary', (req, res) => res.json({ ok: true, summary: { ...activitySummary(req.forge!.owner), cooldownResumeAt: req.forge!.cooldownResumeAt } }));
+app.get('/api/activity/export', async (req, res) => {
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="scrobbleforge-activity.ndjson"');
   try {
-    for (const record of exportActivity()) {
+    for (const record of exportActivity(req.forge!.owner)) {
       if (res.destroyed) break;
       if (!res.write(JSON.stringify(record) + '\n')) await new Promise<void>(resolve => { const done = () => { res.off('drain', done); res.off('close', done); resolve(); }; res.once('drain', done); res.once('close', done); });
     }
     res.end();
   } catch { res.destroy(); }
 });
-app.post('/api/lastfm/disconnect', (_req, res) => {
-  if (jobTimeoutHandle) clearTimeout(jobTimeoutHandle);
-  activeJob.status = 'idle';
-  batchCancel = true;
-  jobCredentials = null;
-  addLog('info', 'Account disconnected; worker stopped and server credentials cleared.', { category: 'auth' });
+app.post('/api/lastfm/disconnect', (req, res) => {
+  if (req.forge!.jobTimeout) clearTimeout(req.forge!.jobTimeout);
+  req.forge!.job.status = 'idle';
+  req.forge!.batchCancel = true;
+  req.forge!.credentials = null;
+  req.forge!.addLog('info', 'Disconnected; the credentials held for this browser were cleared and its worker stopped.', { category: 'auth' });
   res.json({ ok: true });
 });
 
@@ -508,20 +522,20 @@ app.get('/api/job/events', (req: Request, res: Response) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  sseClients.push(res);
-  res.write(`event: status\ndata: ${JSON.stringify(getJobStatusPayload())}\n\n`);
+  req.forge!.sse.push(res);
+  res.write(`event: status\ndata: ${JSON.stringify(req.forge!.jobStatusPayload())}\n\n`);
 
   const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
   req.on('close', () => {
     clearInterval(heartbeat);
-    const idx = sseClients.indexOf(res);
-    if (idx !== -1) sseClients.splice(idx, 1);
+    const idx = req.forge!.sse.indexOf(res);
+    if (idx !== -1) req.forge!.sse.splice(idx, 1);
   });
 });
 
 // Authenticate with Last.fm
 app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
-  if (inFlight || instantRunning || batchRunning || ['running', 'rate_limited'].includes(activeJob.status)) return res.status(409).json({ ok: false, error: 'Pause or stop active submissions before changing credentials.' });
+  if (req.forge!.inFlight || req.forge!.instantRunning || req.forge!.batchRunning || ['running', 'rate_limited'].includes(req.forge!.job.status)) return res.status(409).json({ ok: false, error: 'Pause or stop active submissions before changing credentials.' });
   try {
     const { apiKey, apiSecret, username, password, sessionKey } = req.body;
     if ([apiKey, apiSecret, username, password, sessionKey].some(value => value !== undefined && typeof value !== 'string')) return res.status(400).json({ ok: false, error: 'Authentication fields must be strings.' });
@@ -535,7 +549,7 @@ app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
     }
 
     if (sessionKey && username) {
-      const userInfo = await callLastFmApi(
+      const userInfo = await callLastFmApi(req.forge!, 
         { method: 'user.getInfo', sk: sessionKey, api_key: resolvedApiKey },
         resolvedApiSecret,
         'GET'
@@ -563,7 +577,7 @@ app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
       api_key: resolvedApiKey,
     };
 
-    const authRes = await callLastFmApi(params, resolvedApiSecret, 'POST');
+    const authRes = await callLastFmApi(req.forge!, params, resolvedApiSecret, 'POST');
 
     if (authRes.data && authRes.data.session) {
       const key = authRes.data.session.key;
@@ -571,7 +585,7 @@ app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
 
       let userProfile = null;
       try {
-        const infoRes = await callLastFmApi(
+        const infoRes = await callLastFmApi(req.forge!, 
           { method: 'user.getInfo', user: userName, api_key: resolvedApiKey },
           undefined,
           'GET'
@@ -581,7 +595,7 @@ app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
         }
       } catch { /* Optional profile failed; API transport has already recorded the failure. */ }
 
-      addLog('success', 'Last.fm authentication established.', { category: 'auth' });
+      req.forge!.addLog('success', 'Last.fm authentication established.', { category: 'auth' });
       return res.json({
         ok: true,
         sessionKey: key,
@@ -615,7 +629,7 @@ app.get('/api/lastfm/user-info', async (req: Request, res: Response) => {
         .json({ ok: false, error: 'API Key and username required' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       { method: 'user.getInfo', user: username, api_key: apiKey },
       undefined,
       'GET'
@@ -648,7 +662,7 @@ app.get('/api/lastfm/recent-tracks', async (req: Request, res: Response) => {
         .json({ ok: false, error: 'API Key and username required' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'user.getRecentTracks',
         user: username,
@@ -711,7 +725,7 @@ app.get('/api/lastfm/fetch-profile-tracks', async (req: Request, res: Response) 
         params.extended = '1';
       }
 
-      const response = await callLastFmApi(params, undefined, 'GET');
+      const response = await callLastFmApi(req.forge!, params, undefined, 'GET');
 
       if (response.data && !response.data.error) {
         let rawList: any[] = [];
@@ -782,7 +796,7 @@ app.get('/api/lastfm/fetch-artist-tracks', async (req: Request, res: Response) =
       return res.status(400).json({ ok: false, error: 'API key and artist are required.' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'artist.getTopTracks',
         artist,
@@ -832,7 +846,7 @@ app.get('/api/lastfm/fetch-artist-albums', async (req: Request, res: Response) =
       return res.status(400).json({ ok: false, error: 'API key and artist are required.' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'artist.getTopAlbums',
         artist,
@@ -879,7 +893,7 @@ app.get('/api/lastfm/fetch-album-tracks', async (req: Request, res: Response) =>
       return res.status(400).json({ ok: false, error: 'API key, artist, and album are required.' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'album.getInfo',
         artist,
@@ -936,7 +950,7 @@ app.get('/api/lastfm/search', async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: 'Search term required' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'track.search',
         track: track || artist,
@@ -972,7 +986,7 @@ app.get('/api/lastfm/search-artist', async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: 'Artist search query required' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'artist.search',
         artist: query,
@@ -1015,7 +1029,7 @@ app.get('/api/lastfm/search-album', async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: 'Album search query required' });
     }
 
-    const response = await callLastFmApi(
+    const response = await callLastFmApi(req.forge!, 
       {
         method: 'album.search',
         album: query,
@@ -1058,8 +1072,8 @@ app.get('/api/lastfm/search-user', async (req: Request, res: Response) => {
     }
 
     const [userInfoRes, recentRes] = await Promise.all([
-      callLastFmApi({ method: 'user.getInfo', user: username, api_key: apiKey }, undefined, 'GET'),
-      callLastFmApi(
+      callLastFmApi(req.forge!, { method: 'user.getInfo', user: username, api_key: apiKey }, undefined, 'GET'),
+      callLastFmApi(req.forge!, 
         { method: 'user.getRecentTracks', user: username, limit: '10', api_key: apiKey, extended: '1' },
         undefined,
         'GET'
@@ -1105,11 +1119,11 @@ app.post('/api/lastfm/now-playing', async (req: Request, res: Response) => {
     };
     if (album) params.album = album;
 
-    const response = await callLastFmApi(params, resolvedSecret, 'POST');
+    const response = await callLastFmApi(req.forge!, params, resolvedSecret, 'POST');
     return res.json({ ok: true, data: response.data });
   } catch (err: any) {
     return respondError(res, err);
-  } finally { instantRunning = false; }
+  } finally { req.forge!.instantRunning = false; }
 });
 
 // Instant Single Scrobble
@@ -1138,7 +1152,7 @@ app.post('/api/lastfm/single-scrobble', async (req: Request, res: Response) => {
     };
     if (album) params['album[0]'] = album;
 
-    const response = await callLastFmApi(params, resolvedSecret, 'POST');
+    const response = await callLastFmApi(req.forge!, params, resolvedSecret, 'POST');
     if (response.data && response.data.error) {
       return res.status(400).json({ ok: false, error: response.data.message });
     }
@@ -1146,20 +1160,16 @@ app.post('/api/lastfm/single-scrobble', async (req: Request, res: Response) => {
     return res.status(response.accepted ? 200 : 422).json({ ok: response.accepted > 0, accepted: response.accepted, ignored: response.ignored, error: response.ignored ? 'Last.fm ignored this track. See activity details.' : undefined, data: response.data });
   } catch (err: any) {
     return respondError(res, err);
-  } finally { instantRunning = false; }
+  } finally { req.forge!.instantRunning = false; }
 });
 
-let instantRunning = false;
-let batchRunning = false;
-let batchCancel = false;
-let batchProgress = { id: '', total: 0, accepted: 0, ignored: 0, status: 'idle' };
-app.get('/api/job/batch-status', (_req, res) => res.json({ ok: true, batch: batchProgress }));
-app.post('/api/job/cancel-batch', (_req, res) => { batchCancel = true; addLog('warn', 'Batch cancellation requested; any in-flight chunk will finish first.'); res.json({ ok: true }); });
+app.get('/api/job/batch-status', (req, res) => res.json({ ok: true, batch: req.forge!.batchProgress }));
+app.post('/api/job/cancel-batch', (req, res) => { req.forge!.batchCancel = true; req.forge!.addLog('warn', 'Batch cancellation requested; any in-flight chunk will finish first.'); res.json({ ok: true }); });
 
 // BATCH SCROBBLE ALL: Takes an array of tracks and submits them in chunks of 50
 app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
-  if (instantRunning || batchRunning || ['running', 'rate_limited', 'paused'].includes(activeJob.status) || inFlight) return res.status(409).json({ ok: false, error: 'Stop the active job or batch before starting another submission.' });
-  batchRunning = true; batchCancel = false;
+  if (req.forge!.instantRunning || req.forge!.batchRunning || ['running', 'rate_limited', 'paused'].includes(req.forge!.job.status) || req.forge!.inFlight) return res.status(409).json({ ok: false, error: 'Stop the active job or batch before starting another submission.' });
+  req.forge!.batchRunning = true; req.forge!.batchCancel = false;
   let completed = 0, ignored = 0;
   try {
     const {
@@ -1186,7 +1196,7 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
 
     const batchId = crypto.randomUUID();
     const totalToScrobble = tracks.length;
-    batchProgress = { id: batchId, total: tracks.length, accepted: 0, ignored: 0, status: 'running' };
+    req.forge!.batchProgress = { id: batchId, total: tracks.length, accepted: 0, ignored: 0, status: 'running' };
     const now = Math.floor(Date.now() / 1000);
     const resolvedEnd = endTime ? Math.min(now, Math.floor(endTime)) : now;
     const resolvedStart = startTime
@@ -1199,7 +1209,7 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
     const stepSeconds = spanDuration / totalToScrobble;
     const batchSize = 50;
 
-    addLog(
+    req.forge!.addLog(
       'info',
       `🚀 Commencing batch scrobble: ${totalToScrobble} tracks distributed across time range (${new Date(
         resolvedStart * 1000
@@ -1207,7 +1217,7 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
     );
 
     for (let i = 0; i < totalToScrobble; i += batchSize) {
-      if (batchCancel) { batchProgress.status = 'cancelled'; return res.json({ ok: false, cancelled: true, completed, ignored, error: 'Batch cancelled. Previously accepted tracks are retained.' }); }
+      if (req.forge!.batchCancel) { req.forge!.batchProgress.status = 'cancelled'; return res.json({ ok: false, cancelled: true, completed, ignored, error: 'Batch cancelled. Previously accepted tracks are retained.' }); }
       const currentChunk = tracks.slice(i, i + batchSize);
       const params: Record<string, string> = {
         method: 'track.scrobble',
@@ -1226,10 +1236,10 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
         }
       });
 
-      const response = await callLastFmApi(params, resolvedSecret, 'POST', batchId);
+      const response = await callLastFmApi(req.forge!, params, resolvedSecret, 'POST', batchId);
 
       if (response.data && response.data.error) {
-        addLog(
+        req.forge!.addLog(
           'error',
           `Batch chunk error: ${response.data.message} (code ${response.data.error})`
         );
@@ -1242,9 +1252,9 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
 
       completed += response.accepted;
       ignored += response.ignored;
-      batchProgress.accepted = completed; batchProgress.ignored = ignored;
-      if (response.dailyLimited) { batchProgress.status = 'error'; return res.status(422).json({ ok: false, completed, ignored, errorCode: 29, error: 'Last.fm daily scrobble limit reached. Remaining chunks were not submitted.' }); }
-      addLog(
+      req.forge!.batchProgress.accepted = completed; req.forge!.batchProgress.ignored = ignored;
+      if (response.dailyLimited) { req.forge!.batchProgress.status = 'error'; return res.status(422).json({ ok: false, completed, ignored, errorCode: 29, error: 'Last.fm daily scrobble limit reached. Remaining chunks were not submitted.' }); }
+      req.forge!.addLog(
         'success',
         `Batch chunk confirmed: ${response.accepted} accepted, ${response.ignored} ignored (${completed} accepted overall).`
       );
@@ -1255,15 +1265,15 @@ app.post('/api/job/batch-scrobble-all', async (req: Request, res: Response) => {
       }
     }
 
-    addLog('success', `🎉 Batch scrobble complete! Total ${completed} songs added to Last.fm.`);
-    batchProgress.status = 'completed';
+    req.forge!.addLog('success', `🎉 Batch scrobble complete! Total ${completed} songs added to Last.fm.`);
+    req.forge!.batchProgress.status = 'completed';
     return res.json({ ok: ignored === 0, completed, ignored, error: ignored ? `${ignored} tracks were ignored; see activity history.` : undefined });
   } catch (err) {
-    batchProgress.status = 'error';
+    req.forge!.batchProgress.status = 'error';
     const e = err instanceof LastFmError ? err : new LastFmError(500, undefined, 'Batch failed; check activity history.');
     if (e.retryAfterSeconds) res.setHeader('Retry-After', String(e.retryAfterSeconds));
     return res.status(e.status).json({ ok: false, error: e.message, errorCode: e.code, completed, ignored, retryAfterSeconds: e.retryAfterSeconds, uncertain: e.uncertain });
-  } finally { batchRunning = false; }
+  } finally { req.forge!.batchRunning = false; }
 });
 
 // START BACKGROUND STREAMING JOB (Single or Queue)
@@ -1281,26 +1291,26 @@ app.post('/api/job/start', (req: Request, res: Response) => {
     credentials,
   } = req.body;
 
-  if (instantRunning || batchRunning || inFlight || ['running', 'rate_limited', 'paused'].includes(activeJob.status)) {
+  if (req.forge!.instantRunning || req.forge!.batchRunning || req.forge!.inFlight || ['running', 'rate_limited', 'paused'].includes(req.forge!.job.status)) {
     return res
       .status(400)
       .json({ ok: false, error: 'A scrobble job is already running.' });
   }
 
   if (credentials?.apiKey && credentials?.apiSecret && credentials?.sessionKey) {
-    jobCredentials = { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, sessionKey: credentials.sessionKey, username: typeof credentials.username === 'string' ? credentials.username : '' };
+    req.forge!.credentials = { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret, sessionKey: credentials.sessionKey, username: typeof credentials.username === 'string' ? credentials.username : '' };
   }
 
-  if (isDryRun !== true && (!jobCredentials || !jobCredentials.sessionKey)) {
+  if (isDryRun !== true && (!req.forge!.credentials || !req.forge!.credentials.sessionKey)) {
     return res.status(400).json({
       ok: false,
       error: 'Please connect Last.fm credentials before starting live scrobbles.',
     });
   }
 
-  if (jobTimeoutHandle) {
-    clearTimeout(jobTimeoutHandle);
-    jobTimeoutHandle = null;
+  if (req.forge!.jobTimeout) {
+    clearTimeout(req.forge!.jobTimeout);
+    req.forge!.jobTimeout = null;
   }
 
   const resolvedQueue: QueueTrack[] = Array.isArray(queue) ? queue.map(t => ({ id: typeof t?.id === 'string' ? t.id : crypto.randomUUID(), name: t?.name, artist: t?.artist, album: typeof t?.album === 'string' ? t.album : '', duration: typeof t?.duration === 'number' && Number.isFinite(t.duration) && t.duration > 0 ? t.duration : 180, image: typeof t?.image === 'string' && t.image.startsWith('https://') ? t.image : undefined })) : [];
@@ -1310,7 +1320,7 @@ app.post('/api/job/start', (req: Request, res: Response) => {
     ? resolvedQueue.length
     : Math.max(1, parseInt(limit, 10) || 1800);
 
-  activeJob = {
+  req.forge!.job = {
     jobId: crypto.randomUUID(),
     ignoredCount: 0,
     simulatedCount: 0,
@@ -1333,34 +1343,34 @@ app.post('/api/job/start', (req: Request, res: Response) => {
     rateLimitCooldownSeconds: 0,
     rateLimitResumeAt: null,
     currentError: null,
-    logs: readActivity({ limit: 100 }).logs,
+    logs: readActivity(req.forge!.owner, { limit: 100 }).logs,
   };
 
   const modeDescription = resolvedQueueMode === 'queue_once'
     ? `Queue Mode (${resolvedQueue.length} tracks once)`
     : resolvedQueueMode === 'queue_loop'
-    ? `Queue Loop Mode (${resolvedQueue.length} tracks looped up to ${activeJob.limit})`
-    : `Single Track Loop ("${activeJob.track}" by ${activeJob.artist})`;
+    ? `Queue Loop Mode (${resolvedQueue.length} tracks looped up to ${req.forge!.job.limit})`
+    : `Single Track Loop ("${req.forge!.job.track}" by ${req.forge!.job.artist})`;
 
-  addLog(
+  req.forge!.addLog(
     'info',
-    `✨ Scrobble stream initiated: ${modeDescription} [Interval: ${activeJob.interval}s, Jitter: ${activeJob.jitter ? 'ON' : 'OFF'}${activeJob.isDryRun ? ', DRY RUN' : ''}]`
+    `✨ Scrobble stream initiated: ${modeDescription} [Interval: ${req.forge!.job.interval}s, Jitter: ${req.forge!.job.jitter ? 'ON' : 'OFF'}${req.forge!.job.isDryRun ? ', DRY RUN' : ''}]`
   );
 
-  executeScrobbleStep();
-  return res.json({ ok: true, job: getJobStatusPayload() });
+  req.forge!.executeScrobbleStep();
+  return res.json({ ok: true, job: req.forge!.jobStatusPayload() });
 });
 
 // Pause Job
-app.post('/api/job/pause', (_req: Request, res: Response) => {
-  if (activeJob.status === 'running' || activeJob.status === 'rate_limited') {
-    if (jobTimeoutHandle) {
-      clearTimeout(jobTimeoutHandle);
-      jobTimeoutHandle = null;
+app.post('/api/job/pause', (req: Request, res: Response) => {
+  if (req.forge!.job.status === 'running' || req.forge!.job.status === 'rate_limited') {
+    if (req.forge!.jobTimeout) {
+      clearTimeout(req.forge!.jobTimeout);
+      req.forge!.jobTimeout = null;
     }
-    activeJob.status = 'paused';
-    addLog('warn', '⏸️ Job paused by user.');
-    return res.json({ ok: true, job: getJobStatusPayload() });
+    req.forge!.job.status = 'paused';
+    req.forge!.addLog('warn', '⏸️ Job paused by user.');
+    return res.json({ ok: true, job: req.forge!.jobStatusPayload() });
   }
   return res
     .status(400)
@@ -1368,52 +1378,52 @@ app.post('/api/job/pause', (_req: Request, res: Response) => {
 });
 
 // Resume Job
-app.post('/api/job/resume', (_req: Request, res: Response) => {
-  if (activeJob.status === 'paused') {
-    if (inFlight) return res.status(409).json({ ok: false, error: 'Wait for the in-flight submission to finish.' });
-    activeJob.status = cooldownResumeAt && cooldownResumeAt > Date.now() ? 'rate_limited' : 'running';
-    activeJob.rateLimitResumeAt = activeJob.status === 'rate_limited' ? cooldownResumeAt : null;
-    addLog('info', 'Job resumed; active cooldowns are preserved.');
-    if (activeJob.status === 'rate_limited') scheduleCooldown(); else void executeScrobbleStep();
-    return res.json({ ok: true, job: getJobStatusPayload() });
+app.post('/api/job/resume', (req: Request, res: Response) => {
+  if (req.forge!.job.status === 'paused') {
+    if (req.forge!.inFlight) return res.status(409).json({ ok: false, error: 'Wait for the in-flight submission to finish.' });
+    req.forge!.job.status = req.forge!.cooldownResumeAt && req.forge!.cooldownResumeAt > Date.now() ? 'rate_limited' : 'running';
+    req.forge!.job.rateLimitResumeAt = req.forge!.job.status === 'rate_limited' ? req.forge!.cooldownResumeAt : null;
+    req.forge!.addLog('info', 'Job resumed; active cooldowns are preserved.');
+    if (req.forge!.job.status === 'rate_limited') req.forge!.scheduleCooldown(); else void req.forge!.executeScrobbleStep();
+    return res.json({ ok: true, job: req.forge!.jobStatusPayload() });
   }
   return res.status(400).json({ ok: false, error: 'Job is not paused.' });
 });
 
 // Stop / Reset Job
-app.post('/api/job/stop', (_req: Request, res: Response) => {
-  batchCancel = true;
-  if (jobTimeoutHandle) {
-    clearTimeout(jobTimeoutHandle);
-    jobTimeoutHandle = null;
+app.post('/api/job/stop', (req: Request, res: Response) => {
+  req.forge!.batchCancel = true;
+  if (req.forge!.jobTimeout) {
+    clearTimeout(req.forge!.jobTimeout);
+    req.forge!.jobTimeout = null;
   }
-  activeJob.status = 'idle';
-  activeJob.rateLimitResumeAt = null;
-  addLog(
+  req.forge!.job.status = 'idle';
+  req.forge!.job.rateLimitResumeAt = null;
+  req.forge!.addLog(
     'info',
-    `⏹️ Job terminated. Completed ${activeJob.scrobblesCompleted}/${activeJob.limit} scrobbles.`
+    `⏹️ Job terminated. Completed ${req.forge!.job.scrobblesCompleted}/${req.forge!.job.limit} scrobbles.`
   );
-  return res.json({ ok: true, job: getJobStatusPayload() });
+  return res.json({ ok: true, job: req.forge!.jobStatusPayload() });
 });
 
 // Get Status
-app.get('/api/job/status', (_req: Request, res: Response) => {
-  return res.json({ ok: true, job: getJobStatusPayload() });
+app.get('/api/job/status', (req: Request, res: Response) => {
+  return res.json({ ok: true, job: req.forge!.jobStatusPayload() });
 });
 
 // Clear Logs
-app.post('/api/job/clear-logs', (_req: Request, res: Response) => {
-  addLog('info', 'Console view cleared; persisted activity history retained.');
+app.post('/api/job/clear-logs', (req: Request, res: Response) => {
+  req.forge!.addLog('info', 'Console view cleared; persisted activity history retained.');
   return res.json({ ok: true });
 });
 
 // AutoPlayer routes: local playback simulation for tracks, artists and album queues.
-app.get('/api/player/status', (_req: Request, res: Response) => {
-  return res.json({ ok: true, player: playerStatusPayload() });
+app.get('/api/player/status', (req: Request, res: Response) => {
+  return res.json({ ok: true, player: req.forge!.playerStatusPayload() });
 });
 
 app.post('/api/player/start', (req: Request, res: Response) => {
-  if (autoplayer.status === 'playing' || autoplayer.status === 'paused') {
+  if (req.forge!.player.status === 'playing' || req.forge!.player.status === 'paused') {
     return res.status(409).json({ ok: false, error: 'The AutoPlayer is already running. Stop the current session first.' });
   }
   const { queue, trackDurationSeconds, loopQueue, shuffle } = req.body;
@@ -1422,39 +1432,39 @@ app.post('/api/player/start', (req: Request, res: Response) => {
   if (!resolvedQueue.length || resolvedQueue.length > 5000 || resolvedQueue.some(t => typeof t?.name !== 'string' || !t.name.trim() || typeof t.artist !== 'string' || !t.artist.trim()) || !Number.isFinite(requestedDuration) || requestedDuration < 1 || requestedDuration > 3600) {
     return res.status(400).json({ ok: false, error: 'The AutoPlayer needs 1-5000 tracks and a play duration between 1 and 3600 seconds.' });
   }
-  clearPlayerTimer();
-  autoplayer.sessionId = crypto.randomUUID();
-  autoplayer.queue = shuffle === true ? shuffled([...resolvedQueue]) : resolvedQueue;
-  autoplayer.currentIndex = 0;
-  autoplayer.trackDurationSeconds = Math.round(requestedDuration);
-  autoplayer.loopQueue = loopQueue !== false;
-  autoplayer.shuffle = shuffle === true;
-  autoplayer.playsCompleted = 0;
-  autoplayer.startedAt = Date.now();
-  autoplayer.lastPlayAt = null;
-  autoplayer.stoppedReason = null;
-  autoplayer.status = 'playing';
-  recordActivity('info', `AutoPlayer session started: ${autoplayer.queue.length} track${autoplayer.queue.length === 1 ? '' : 's'}, ${autoplayer.trackDurationSeconds}s per play${autoplayer.loopQueue ? ', looping' : ''}. Local mode - no Last.fm API calls.`, { category: 'player', jobId: autoplayer.sessionId, total: autoplayer.queue.length });
-  emitPlayerState();
-  startPlay();
-  return res.json({ ok: true, player: playerStatusPayload() });
+  req.forge!.clearPlayerTimer();
+  req.forge!.player.sessionId = crypto.randomUUID();
+  req.forge!.player.queue = shuffle === true ? shuffled([...resolvedQueue]) : resolvedQueue;
+  req.forge!.player.currentIndex = 0;
+  req.forge!.player.trackDurationSeconds = Math.round(requestedDuration);
+  req.forge!.player.loopQueue = loopQueue !== false;
+  req.forge!.player.shuffle = shuffle === true;
+  req.forge!.player.playsCompleted = 0;
+  req.forge!.player.startedAt = Date.now();
+  req.forge!.player.lastPlayAt = null;
+  req.forge!.player.stoppedReason = null;
+  req.forge!.player.status = 'playing';
+  recordActivity(req.forge!.owner, 'info', `AutoPlayer session started: ${req.forge!.player.queue.length} track${req.forge!.player.queue.length === 1 ? '' : 's'}, ${req.forge!.player.trackDurationSeconds}s per play${req.forge!.player.loopQueue ? ', looping' : ''}. Local mode - no Last.fm API calls.`, { category: 'player', jobId: req.forge!.player.sessionId, total: req.forge!.player.queue.length });
+  req.forge!.emitPlayerState();
+  req.forge!.startPlay();
+  return res.json({ ok: true, player: req.forge!.playerStatusPayload() });
 });
 
-app.post('/api/player/pause', (_req: Request, res: Response) => {
-  return pausePlayer() ? res.json({ ok: true, player: playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not playing.' });
+app.post('/api/player/pause', (req: Request, res: Response) => {
+  return req.forge!.pausePlayer() ? res.json({ ok: true, player: req.forge!.playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not playing.' });
 });
 
-app.post('/api/player/resume', (_req: Request, res: Response) => {
-  return resumePlayer() ? res.json({ ok: true, player: playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not paused.' });
+app.post('/api/player/resume', (req: Request, res: Response) => {
+  return req.forge!.resumePlayer() ? res.json({ ok: true, player: req.forge!.playerStatusPayload() }) : res.status(409).json({ ok: false, error: 'The AutoPlayer is not paused.' });
 });
 
-app.post('/api/player/stop', (_req: Request, res: Response) => {
-  if (autoplayer.status !== 'idle') {
-    const played = autoplayer.playsCompleted;
-    stopPlayer(`Stopped after ${played} tracked play${played === 1 ? '' : 's'}.`);
-    recordActivity('info', `AutoPlayer session stopped after ${played} locally tracked play${played === 1 ? '' : 's'}. No Last.fm API calls were made.`, { category: 'player', jobId: autoplayer.sessionId || undefined, count: played, total: autoplayer.queue.length });
+app.post('/api/player/stop', (req: Request, res: Response) => {
+  if (req.forge!.player.status !== 'idle') {
+    const played = req.forge!.player.playsCompleted;
+    req.forge!.stopPlayer(`Stopped after ${played} tracked play${played === 1 ? '' : 's'}.`);
+    recordActivity(req.forge!.owner, 'info', `AutoPlayer session stopped after ${played} locally tracked play${played === 1 ? '' : 's'}. No Last.fm API calls were made.`, { category: 'player', jobId: req.forge!.player.sessionId || undefined, count: played, total: req.forge!.player.queue.length });
   }
-  return res.json({ ok: true, player: playerStatusPayload() });
+  return res.json({ ok: true, player: req.forge!.playerStatusPayload() });
 });
 
 // Spotify playback bridge: the browser plays audio through Spotify (Web Playback SDK
@@ -1473,19 +1483,19 @@ app.post('/api/player/played', (req: Request, res: Response) => {
   const resolvedDuration = Number.isFinite(Number(durationMs)) ? Math.max(0, Math.min(Math.round(Number(durationMs)), 86400000)) : 0;
   const resolvedSource = source === 'spotify' ? 'Spotify' : 'Local';
   const resolvedSession = typeof sessionId === 'string' && sessionId.length <= 100 ? sessionId : undefined;
-  recordActivity('info', `${resolvedSource} playback completed: "${track.trim()}" by ${artist.trim()}${scrobbled === true ? ' - submitted to Last.fm.' : ' - kept local (no Last.fm submission).'}`, {
+  recordActivity(req.forge!.owner, 'info', `${resolvedSource} playback completed: "${track.trim()}" by ${artist.trim()}${scrobbled === true ? ' - submitted to Last.fm.' : ' - kept local (no Last.fm submission).'}`, {
     category: 'player', track: track.trim(), artist: artist.trim(), album: typeof album === 'string' && album.trim() ? album.trim() : undefined,
     outcome: 'played', durationMs: resolvedDuration, jobId: resolvedSession,
   });
   return res.json({ ok: true });
 });
 
-app.use('/api', (err: any, _req: Request, res: Response, _next: express.NextFunction) => {
-  addLog('error', 'API request rejected or internal handler failed.', { category: 'system', httpStatus: err.status || 500, outcome: 'failed' });
+app.use('/api', (err: any, req: Request, res: Response, _next: express.NextFunction) => {
+  req.forge!.addLog('error', 'API request rejected or internal handler failed.', { category: 'system', httpStatus: err.status || 500, outcome: 'failed' });
   res.status(err.status || 500).json({ ok: false, error: err.status === 400 ? 'Invalid JSON request.' : 'Request failed; check activity history.' });
 });
 
-app.use('/api', (_req, res) => res.status(404).json({ ok: false, error: 'Unknown API endpoint.' }));
+app.use('/api', (req, res) => res.status(404).json({ ok: false, error: 'Unknown API endpoint.' }));
 
 // Start Express and integrate Vite in development or static serve in production
 async function startServer() {
@@ -1504,7 +1514,7 @@ async function startServer() {
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
+    app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
