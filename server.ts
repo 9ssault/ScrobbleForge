@@ -16,7 +16,6 @@ const LASTFM_API_URL = 'https://ws.audioscrobbler.com/2.0/';
 
 const ENV_API_KEY = process.env.LASTFM_API_KEY || '';
 const ENV_API_SECRET = process.env.LASTFM_API_SECRET || '';
-const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || '';
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -532,13 +531,6 @@ app.get('/api/lastfm/server-config', (_req: Request, res: Response) => {
 });
 
 // Authenticate with Last.fm
-// Spotify playback bridge: public configuration only. Browser-side OAuth uses the
-// Authorization Code + PKCE flow, which needs just the public Client ID; no client
-// secret is ever requested, stored or transmitted.
-app.get('/api/spotify/config', (_req: Request, res: Response) => {
-  return res.json({ ok: true, clientId: SPOTIFY_CLIENT_ID || null, redirectPath: '/spotify-callback' });
-});
-
 app.post('/api/lastfm/auth', async (req: Request, res: Response) => {
   if (inFlight || instantRunning || batchRunning || ['running', 'rate_limited'].includes(activeJob.status)) return res.status(409).json({ ok: false, error: 'Pause or stop active submissions before changing credentials.' });
   try {

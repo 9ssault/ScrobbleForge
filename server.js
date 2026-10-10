@@ -94,7 +94,6 @@ var PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3e3;
 var LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/";
 var ENV_API_KEY = process.env.LASTFM_API_KEY || "";
 var ENV_API_SECRET = process.env.LASTFM_API_SECRET || "";
-var SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || "";
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 function generateLastFmSig(params, apiSecret) {
@@ -615,9 +614,6 @@ app.get("/api/lastfm/server-config", (_req, res) => {
     hasServerApiKey: Boolean(ENV_API_KEY),
     serverApiKey: ENV_API_KEY || null
   });
-});
-app.get("/api/spotify/config", (_req, res) => {
-  return res.json({ ok: true, clientId: SPOTIFY_CLIENT_ID || null, redirectPath: "/spotify-callback" });
 });
 app.post("/api/lastfm/auth", async (req, res) => {
   if (inFlight || instantRunning || batchRunning || ["running", "rate_limited"].includes(activeJob.status)) return res.status(409).json({ ok: false, error: "Pause or stop active submissions before changing credentials." });

@@ -12,7 +12,6 @@ interface AutoPlayerProps {
   onResume: () => void;
   onStop: () => void;
   isLastFmConnected: boolean;
-  spotifyClientId: string | null;
   onScrobble: (artist: string, track: string, album: string, timestamp?: number) => Promise<boolean>;
   onNowPlaying: (artist: string, track: string, album: string) => Promise<boolean>;
 }
@@ -24,7 +23,7 @@ const Equalizer: React.FC<{ active: boolean }> = ({ active }) => <span aria-hidd
   {[0, 1, 2, 3].map(bar => <span key={bar} className={`w-[3px] rounded-full ${active ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-700'}`} style={{ height: active ? `${[45, 100, 65, 85][bar]}%` : '30%', animationDelay: `${bar * 140}ms` }} />)}
 </span>;
 
-export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackTrack, onStart, onPause, onResume, onStop, isLastFmConnected, spotifyClientId, onScrobble, onNowPlaying }) => {
+export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackTrack, onStart, onPause, onResume, onStop, isLastFmConnected, onScrobble, onNowPlaying }) => {
   const [trackDurationSeconds, setTrackDurationSeconds] = useState(30);
   const [loopQueue, setLoopQueue] = useState(true);
   const [shuffle, setShuffle] = useState(false);
@@ -146,6 +145,6 @@ export const AutoPlayer: React.FC<AutoPlayerProps> = ({ player, queue, fallbackT
 
       {player?.startedAt && <p className="text-[11px] text-zinc-500">Session started {new Date(player.startedAt).toLocaleTimeString()} · {plays} play{plays === 1 ? '' : 's'} journaled locally · no Last.fm request was made</p>}
     </div>
-    </> : <SpotifyPlayer queue={queue} isLastFmConnected={isLastFmConnected} spotifyClientId={spotifyClientId} onScrobble={onScrobble} onNowPlaying={onNowPlaying} />}
+    </> : <SpotifyPlayer queue={queue} isLastFmConnected={isLastFmConnected} onScrobble={onScrobble} onNowPlaying={onNowPlaying} />}
   </section>;
 };

@@ -31,7 +31,6 @@ const RESOLVE_CONCURRENCY = 3;
 interface SpotifyPlayerProps {
   queue: QueueTrack[];
   isLastFmConnected: boolean;
-  spotifyClientId: string | null;
   onScrobble: (artist: string, track: string, album: string, timestamp?: number) => Promise<boolean>;
   onNowPlaying: (artist: string, track: string, album: string) => Promise<boolean>;
 }
@@ -43,9 +42,9 @@ const toneClass: Record<FeedEntry['tone'], string> = { info: 'text-zinc-400', su
 const randomId = () => (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 const formatClock = (ms: number) => { const total = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
 
-export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmConnected, spotifyClientId, onScrobble, onNowPlaying }) => {
+export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmConnected, onScrobble, onNowPlaying }) => {
   const [session, setSession] = useState<SpotifySession | null>(() => loadSpotifySession());
-  const [clientId, setClientId] = useState(() => loadSpotifyClientId(spotifyClientId));
+  const [clientId, setClientId] = useState(() => loadSpotifyClientId());
   const [authorizing, setAuthorizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [devices, setDevices] = useState<SpotifyDevice[]>([]);
@@ -73,7 +72,6 @@ export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmCon
   const pollBusyRef = useRef(false);
   const pollNowRef = useRef<(() => void) | null>(null);
   const mountedRef = useRef(true);
-  const clientIdTouchedRef = useRef(false);
 
   const addFeed = useCallback((text: string, tone: FeedEntry['tone'] = 'info') => {
     setFeed(previous => [{ id: randomId(), at: Date.now(), text, tone }, ...previous].slice(0, 8));
@@ -81,12 +79,6 @@ export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmCon
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   useEffect(() => { sessionRef.current = session; }, [session]);
-  // The server's SPOTIFY_CLIENT_ID (via /api/spotify/config) is used until the user types one.
-  useEffect(() => {
-    if (clientIdTouchedRef.current || clientId.trim()) return;
-    const hint = loadSpotifyClientId(spotifyClientId);
-    if (hint) setClientId(hint);
-  }, [spotifyClientId, clientId]);
   useEffect(() => {
     if (!tracking) return;
     const timer = window.setInterval(() => setNow(Date.now()), 500);
@@ -285,9 +277,8 @@ export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmCon
   };
 
   const handleConnect = async () => {
-    const requestedClientId = clientId.trim() || loadSpotifyClientId(spotifyClientId);
     setError(null); setAuthorizing(true);
-    try { saveSpotifyClientId(requestedClientId); await beginSpotifyAuth(requestedClientId); }
+    try { saveSpotifyClientId(clientId); await beginSpotifyAuth(clientId); }
     catch (caught: any) { setError(caught?.message || 'Spotify authorization could not start.'); setAuthorizing(false); }
   };
 
@@ -305,9 +296,6 @@ export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmCon
     try { await navigator.clipboard.writeText(spotifyRedirectUri()); addFeed('Redirect URI copied to the clipboard.', 'info'); }
     catch { setError(`Copy blocked by the browser. The redirect URI is ${spotifyRedirectUri()}`); }
   };
-
-  const effectiveClientId = clientId.trim() || loadSpotifyClientId(spotifyClientId);
-  const usingServerClientId = !clientId.trim() && Boolean(effectiveClientId);
 
   const liveTrack = playback?.track || null;
   const durationMs = liveTrack?.durationMs || 0;
@@ -337,15 +325,14 @@ export const SpotifyPlayer: React.FC<SpotifyPlayerProps> = ({ queue, isLastFmCon
         <li>Create an app in the <a className="text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1" href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify developer dashboard <ExternalLink size={11} /></a>.</li>
         <li>Add the redirect URI shown below to that app.</li>
         <li>Add your Spotify account e-mail under the app&apos;s Users Management (development mode).</li>
-        <li>Paste the app&apos;s Client ID — this app uses PKCE, so no client secret is needed.</li>
+        <li>Paste the app&apos;s Client ID — this app uses PKCE, so no client secret is needed. It is saved in this browser only and never sent to the server.</li>
       </ol>
       <div className="flex flex-wrap items-center gap-2">
-        <input aria-label="Spotify Client ID" value={clientId} onChange={event => { clientIdTouchedRef.current = true; setClientId(event.target.value); }} placeholder="Spotify Client ID" className="flex-1 min-w-[220px] px-3 py-2 text-xs" />
-        <button type="button" className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-xl shadow-lg shadow-emerald-950/40 flex items-center gap-2 disabled:opacity-60" onClick={handleConnect} disabled={authorizing || !effectiveClientId}>
+        <input aria-label="Spotify Client ID" value={clientId} onChange={event => setClientId(event.target.value)} placeholder="Spotify Client ID" className="flex-1 min-w-[220px] px-3 py-2 text-xs" />
+        <button type="button" className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-xl shadow-lg shadow-emerald-950/40 flex items-center gap-2 disabled:opacity-60" onClick={handleConnect} disabled={authorizing || !clientId.trim()}>
           {authorizing ? <Loader2 size={14} className="animate-spin" /> : <Music size={14} />}{authorizing ? 'Opening Spotify' : 'Connect Spotify'}
         </button>
       </div>
-      {usingServerClientId && <p className="text-[11px] text-emerald-400/80">Using the Client ID configured on the server (<code>SPOTIFY_CLIENT_ID</code>).</p>}
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
         <span>Redirect URI:</span><span className="font-mono break-all text-zinc-400">{spotifyRedirectUri()}</span>
         <button type="button" className="secondary-button text-[11px] flex items-center gap-1" onClick={copyRedirect}><Copy size={12} />Copy</button>

@@ -9,6 +9,10 @@
  * browser") or on any Spotify Connect device (phone, desktop, speaker, TV). Spotify
  * Premium is required by Spotify for playback control.
  *
+ * The operator enters their own Client ID once; it is kept in this browser's storage only
+ * and is never sent to the server, so nothing about the Spotify application is served by
+ * the app or shared between visitors.
+ *
  * Completed plays are reported through /api/player/played, and certified plays are
  * submitted to Last.fm through the regular scrobble endpoints - never from here.
  */
@@ -224,11 +228,9 @@ export function saveSpotifySession(session: SpotifySession | null): void {
   } catch { /* Private mode: the session simply will not survive a reload. */ }
 }
 
-export function loadSpotifyClientId(serverClientId: string | null): string {
-  if (typeof window !== 'undefined') {
-    try { const stored = window.localStorage.getItem(SPOTIFY_CLIENT_ID_KEY); if (stored) return stored; } catch { /* ignore */ }
-  }
-  return serverClientId || '';
+export function loadSpotifyClientId(): string {
+  if (typeof window === 'undefined') return '';
+  try { return window.localStorage.getItem(SPOTIFY_CLIENT_ID_KEY) || ''; } catch { return ''; }
 }
 
 export function saveSpotifyClientId(clientId: string): void {

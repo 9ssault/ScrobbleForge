@@ -88,19 +88,8 @@ export default function App() {
     } catch { setNotice('Queue could not be saved in this browser. Export it before leaving.'); }
   }, [queue]);
 
-  // Spotify playback bridge (optional): public Client ID from the server plus the OAuth redirect.
-  const [spotifyClientId, setSpotifyClientId] = useState<string | null>(null);
-  useEffect(() => {
-    void (async () => {
-      try {
-        const response = await fetch('/api/spotify/config');
-        if (!response.ok) return;
-        const data = await response.json();
-        if (typeof data.clientId === 'string' && data.clientId) setSpotifyClientId(data.clientId);
-      } catch { /* Spotify is optional; the Auto player tab explains how to connect it. */ }
-    })();
-  }, []);
-
+  // Spotify playback bridge: the OAuth redirect lands back here and the Client ID stays in
+  // this browser, so the server never holds or serves any Spotify configuration.
   useEffect(() => {
     void handleSpotifyRedirect().then(result => {
       if (!result) return;
@@ -696,7 +685,6 @@ export default function App() {
                 queue={queue}
                 fallbackTrack={{ artist: job.artist, track: job.track, album: job.album }}
                 isLastFmConnected={isConnected}
-                spotifyClientId={spotifyClientId}
                 onScrobble={handleSingleScrobble}
                 onNowPlaying={handleUpdateNowPlaying}
                 onStart={handleStartPlayer}

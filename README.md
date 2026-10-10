@@ -43,8 +43,8 @@ studio's normal scrobble endpoints (identical rate-limit pacing, cooldowns and j
    e.g. `http://127.0.0.1:3000/spotify-callback` (`localhost` is not accepted).
 3. Add your Spotify account e-mail under the app's **Users Management** (development-mode apps must
    allow-list every listener).
-4. Paste the Client ID into the Auto player tab, or set it once for the whole server with
-   `SPOTIFY_CLIENT_ID="..."` in `.env` (see `.env.example`) — it is served by `GET /api/spotify/config`.
+4. Paste the Client ID into the Auto player tab. It is saved in that browser only and is never
+   sent to the server, so the app does not hold or serve your Spotify application details.
 5. Press **Connect Spotify**, pick a device, then **Start Spotify player**.
 
 | Route | Purpose |
@@ -54,7 +54,6 @@ studio's normal scrobble endpoints (identical rate-limit pacing, cooldowns and j
 | `POST /api/player/stop` | Ends the simulation and journals a summary line |
 | `GET /api/player/status` | Current simulation state (also streamed over `/api/job/events` as the `player` event) |
 | `POST /api/player/played` | `{ track, artist, album?, durationMs?, source, scrobbled, sessionId? }` — journals a completed Spotify play |
-| `GET /api/spotify/config` | `{ clientId }` — the optional public Spotify Client ID from `.env` |
 
 Spotify scrobbles go through the existing `/api/lastfm/now-playing` and
 `/api/lastfm/single-scrobble` endpoints, so cooldowns, rate-limit pacing and journaling behave
