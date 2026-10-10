@@ -559,7 +559,7 @@ function shuffled(items) {
   }
   return items;
 }
-var SESSION_COOKIE = "sforge_owner";
+var SESSION_COOKIE = "sforge_session";
 var SESSION_IDLE_MS = 12 * 60 * 60 * 1e3;
 var MAX_SESSIONS = 400;
 var sessions = /* @__PURE__ */ new Map();

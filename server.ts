@@ -419,7 +419,10 @@ function shuffled<T>(items: T[]): T[] {
   return items;
 }
 
-const SESSION_COOKIE = 'sforge_owner';
+// The identity lives in a session cookie. The name is versioned because an earlier build issued a
+// persistent 'sforge_owner' cookie with Max-Age=31536000: renaming retires those year-long identities
+// instead of letting an existing browser keep one forever. The old name is ignored from now on.
+const SESSION_COOKIE = 'sforge_session';
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const MAX_SESSIONS = 400;
 const sessions = new Map<string, ForgeSession>();

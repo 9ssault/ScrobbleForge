@@ -14,6 +14,11 @@ session-scoped `HttpOnly`, `SameSite=Lax` cookie on its first API request. The c
 new, unique id. Every tab in that browser shares the one session it has; a different browser session
 never sees it.
 
+The identity is carried in an `sforge_session` session cookie (no `Max-Age`/`Expires`). An earlier
+build issued a persistent `sforge_owner` cookie good for a year; the name was changed on purpose so
+those year-long identities are retired — the old cookie is ignored from now on and that browser is
+minted a fresh session, which is why a journal id you copied before this change no longer resolves.
+
 - **Credentials are never stored for anyone else.** Each request carries the caller's own Last.fm
   API key, secret and session key; the server has no shared key and no fallback cache. A background
   job keeps the credentials it was started with only while it runs, for that session alone. A new

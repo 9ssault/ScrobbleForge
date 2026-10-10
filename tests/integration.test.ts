@@ -27,7 +27,7 @@ async function harness() {
   const withCookie = (headers: Record<string, string> = {}) => (cookie ? { Cookie: cookie, ...headers } : headers);
   const capture = <T extends { headers: Headers }>(response: T) => {
     const set = response.headers.get('set-cookie');
-    const match = set ? /sforge_owner=[0-9a-fA-F-]{36}/.exec(set) : null;
+    const match = set ? /sforge_session=[0-9a-fA-F-]{36}/.exec(set) : null;
     if (match) cookie = match[0];
     return response;
   };
@@ -312,7 +312,8 @@ test('the first API response mints an HttpOnly, same-site session cookie that di
   try {
     const first = await fetch(app.origin + '/api/job/status');
     const setCookie = first.headers.get('set-cookie') || '';
-    assert.match(setCookie, /sforge_owner=[0-9a-f-]{36}/i);
+    assert.match(setCookie, /sforge_session=[0-9a-f-]{36}/i);
+    assert.doesNotMatch(setCookie, /sforge_owner/i, 'the retired persistent cookie must not be issued again');
     assert.match(setCookie, /HttpOnly/i);
     assert.match(setCookie, /SameSite=Lax/i);
     // A session cookie, not a persistent one: it must not outlive the browser session, so the next
@@ -329,8 +330,13 @@ test('the first API response mints an HttpOnly, same-site session cookie that di
     assert.match(secondOwner.owner, /^[0-9a-f-]{36}$/i);
     assert.notEqual(firstOwner.owner, secondOwner.owner, 'each new browser session is unique');
 
+    // A cookie from the old persistent scheme is not honoured: that browser gets a new session id.
+    const legacyCookie = await (await fetch(app.origin + '/api/identity', { headers: { Cookie: 'sforge_owner=11111111-2222-3333-4444-555555555555' } })).json();
+    assert.notEqual(legacyCookie.owner, '11111111-2222-3333-4444-555555555555', 'year-long identities are retired');
+    assert.match(legacyCookie.owner, /^[0-9a-f-]{36}$/i);
+
     // The same session keeps its identity (this is what every tab in one browser shares).
-    const repeated = await (await fetch(app.origin + '/api/identity', { headers: { Cookie: `sforge_owner=${firstOwner.owner}` } })).json();
+    const repeated = await (await fetch(app.origin + '/api/identity', { headers: { Cookie: `sforge_session=${firstOwner.owner}` } })).json();
     assert.equal(repeated.owner, firstOwner.owner, 'a session keeps its identity for its lifetime');
   } finally { await app.close(); }
 });
@@ -339,7 +345,7 @@ test('visitors are isolated: journals, jobs and player state belong to one brows
   const app = await harness();
   try {
     const otherOwner = '11111111-2222-3333-4444-555555555555';
-    const asOther = async (route: string, init: RequestInit = {}) => fetch(app.origin + route, { ...init, headers: { Cookie: `sforge_owner=${otherOwner}`, ...(init.headers as Record<string, string> || {}) } });
+    const asOther = async (route: string, init: RequestInit = {}) => fetch(app.origin + route, { ...init, headers: { Cookie: `sforge_session=${otherOwner}`, ...(init.headers as Record<string, string> || {}) } });
 
     assert.equal((await app.post('/api/lastfm/single-scrobble', { ...credentials, artist: 'Operator', track: 'Operator-track' })).status, 200);
     assert.equal((await app.post('/api/job/start', { artist: 'Operator', track: 'Operator-track', credentials, isDryRun: true, limit: 5, interval: 5, jitter: false })).status, 200);
