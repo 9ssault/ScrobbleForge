@@ -575,7 +575,7 @@ function ensureSessionOwner(req, res) {
   const existing = readSessionCookie(req.headers.cookie);
   if (existing && /^[0-9a-fA-F-]{36}$/.test(existing)) return existing;
   const owner = crypto2.randomUUID();
-  res.append("Set-Cookie", `${SESSION_COOKIE}=${owner}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly`);
+  res.append("Set-Cookie", `${SESSION_COOKIE}=${owner}; Path=/; SameSite=Lax; HttpOnly`);
   return owner;
 }
 function getSession(owner) {

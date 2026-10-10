@@ -433,12 +433,15 @@ function readSessionCookie(header: string | undefined): string | null {
   return null;
 }
 
-// First API response mints a per-browser identity; every later request carries it automatically.
+// First API response mints the identity for one browser session. The cookie has no Max-Age on
+// purpose: it is a session cookie, so it dies when the browser closes and the next browser session
+// mints a brand new, unique identity. Every tab in that browser shares it (cookies are per browser),
+// while every other browser session is a separate, empty workspace.
 function ensureSessionOwner(req: Request, res: Response): string {
   const existing = readSessionCookie(req.headers.cookie);
   if (existing && /^[0-9a-fA-F-]{36}$/.test(existing)) return existing;
   const owner = crypto.randomUUID();
-  res.append('Set-Cookie', `${SESSION_COOKIE}=${owner}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly`);
+  res.append('Set-Cookie', `${SESSION_COOKIE}=${owner}; Path=/; SameSite=Lax; HttpOnly`);
   return owner;
 }
 
@@ -461,8 +464,9 @@ function sweepSessions() {
   }
 }
 
-// Public deployment: each visitor is isolated behind an HttpOnly cookie minted on the first API
-// response. Credentials, job/player state, journal rows and SSE streams all belong to that browser.
+// Public deployment: each browser session is isolated behind an HttpOnly session cookie minted on
+// its first API response. Credentials, job/player state, journal rows and SSE streams all belong to
+// that session object; a new browser session gets a new, unique id and therefore an empty workspace.
 app.use('/api', (req, res, next) => {
   res.setHeader('Cache-Control', 'private, no-store');
   const owner = ensureSessionOwner(req, res);

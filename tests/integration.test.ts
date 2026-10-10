@@ -307,7 +307,7 @@ test('credentials are never reused across visitors and the server exposes no Las
   } finally { await app.close(); }
 });
 
-test('the first API response mints an HttpOnly, same-site per-browser session cookie', async () => {
+test('the first API response mints an HttpOnly, same-site session cookie that dies with the browser session', async () => {
   const app = await harness();
   try {
     const first = await fetch(app.origin + '/api/job/status');
@@ -315,8 +315,23 @@ test('the first API response mints an HttpOnly, same-site per-browser session co
     assert.match(setCookie, /sforge_owner=[0-9a-f-]{36}/i);
     assert.match(setCookie, /HttpOnly/i);
     assert.match(setCookie, /SameSite=Lax/i);
+    // A session cookie, not a persistent one: it must not outlive the browser session, so the next
+    // browser session is a new, unique workspace.
+    assert.doesNotMatch(setCookie, /Max-Age/i, 'the identity cookie must not persist past the session');
+    assert.doesNotMatch(setCookie, /Expires/i, 'the identity cookie must not persist past the session');
+
+    // Two browser sessions never share an identity.
     const second = await fetch(app.origin + '/api/job/status');
-    assert.notEqual(second.headers.get('set-cookie'), setCookie, 'every browser gets its own identity');
+    assert.notEqual(second.headers.get('set-cookie'), setCookie, 'every browser session gets its own identity');
+    const firstOwner = await (await fetch(app.origin + '/api/identity')).json();
+    const secondOwner = await (await fetch(app.origin + '/api/identity')).json();
+    assert.match(firstOwner.owner, /^[0-9a-f-]{36}$/i);
+    assert.match(secondOwner.owner, /^[0-9a-f-]{36}$/i);
+    assert.notEqual(firstOwner.owner, secondOwner.owner, 'each new browser session is unique');
+
+    // The same session keeps its identity (this is what every tab in one browser shares).
+    const repeated = await (await fetch(app.origin + '/api/identity', { headers: { Cookie: `sforge_owner=${firstOwner.owner}` } })).json();
+    assert.equal(repeated.owner, firstOwner.owner, 'a session keeps its identity for its lifetime');
   } finally { await app.close(); }
 });
 

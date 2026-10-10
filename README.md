@@ -8,21 +8,29 @@ Elevates the original Python `scrobble.py` and `main.py` scripts into a comprehe
 
 ## 🔒 Multi-visitor isolation (public hosting)
 
-ScrobbleForge is safe to host publicly: every browser gets its own identity, minted as an
-`HttpOnly`, `SameSite=Lax` cookie on its first API request.
+ScrobbleForge is safe to host publicly: every **browser session** gets its own identity, minted as a
+session-scoped `HttpOnly`, `SameSite=Lax` cookie on its first API request. The cookie carries no
+`Max-Age`/`Expires`, so it dies when the browser closes and the next browser session mints a brand
+new, unique id. Every tab in that browser shares the one session it has; a different browser session
+never sees it.
 
 - **Credentials are never stored for anyone else.** Each request carries the caller's own Last.fm
   API key, secret and session key; the server has no shared key and no fallback cache. A background
-  job keeps the credentials it was started with only while it runs, for that browser alone.
-- **The journal is per browser.** `/api/activity`, its summary and the NDJSON export only ever
-  return rows written by that same browser.
-- **The engine is per browser.** Job state, cooldown timers, batch progress, the AutoPlayer and the
-  SSE stream all belong to one cookie, so visitors cannot pause, stop or read each other's runs.
+  job keeps the credentials it was started with only while it runs, for that session alone. A new
+  session therefore starts disconnected and reconnects with its own account.
+- **The journal is per session.** `/api/activity`, its summary and the NDJSON export only ever
+  return rows written by that same browser session.
+- **The engine is per session.** Job state, cooldown timers, batch progress, the AutoPlayer and the
+  SSE stream all belong to one session cookie, so no session can pause, stop or read another's runs.
+- **Browser-local workspace is per session too.** The queue, the simulated clock and saved
+  credential hints live under the session id and are discarded when the identity changes, so a new
+  browser session always starts from an empty workspace. Device-level preferences (theme, player
+  mode, Spotify connection) are kept.
 - Sessions are swept after 12 hours of inactivity (timers cleared), and the server caps how many it
   keeps in memory.
 
 Rows written before this model existed have no owner and are therefore not shown to anyone; the
-Auto player tab's *Developer tools* section shows this browser's journal id, and an operator can
+Auto player tab's *Developer tools* section shows this session's journal id, and an operator can
 attach the old rows with
 `sqlite3 data/activity.sqlite "UPDATE activity SET owner='<journal id>' WHERE owner IS NULL"`.
 
@@ -280,7 +288,7 @@ ScrobbleForge connects directly to Last.fm's official Web Services API.
    - Enter your **API Key**, **API Secret**, **Username**, and **Password**.
    - Click **Authenticate & Connect**.
 
-> **Security Note**: The browser sends credentials to your ScrobbleForge server, which forwards them to Last.fm over HTTPS. Passwords, secrets, session keys, and raw API payloads are not written to the activity journal or browser storage. Reconnect after reload. The server caches credentials in memory until disconnect/restart. This is a single-operator app: do not expose it publicly without an authenticated access proxy.
+> **Security Note**: The browser sends credentials to your ScrobbleForge server, which forwards them to Last.fm over HTTPS. Passwords, secrets, session keys, and raw API payloads are not written to the activity journal or browser storage. Reconnect after reload. The server holds credentials in memory for the running session only, and a new browser session starts with none. Public hosting is supported: every browser session is isolated (see *Multi-visitor isolation* above), which is not the same as user accounts — it keeps sessions from touching each other, not a determined attacker with access to the machine.
 
 ---
 
@@ -385,7 +393,7 @@ npm run dev
 
 The unused dependency is not imported or bundled. The lockfile was preserved during this upgrade. `npm start` serves the built production output; `npm run dev` runs Express with Vite middleware on `0.0.0.0:3000`.
 
-**Hosting limitations:** this uses a Node/Express server, SQLite, and timers; it is not a Cloudflare Worker build. It has no application-level multi-user authentication or per-user data isolation. Run locally or behind trusted authenticated access. Same-origin mutation checks do not replace authentication. Last.fm browser-authorization migration, durable resumable batches, true full-day analytics, and PWA offline installation remain future work.
+**Hosting limitations:** this uses a Node/Express server, SQLite, and timers; it is not a Cloudflare Worker build. Sessions are isolated per browser session but there are no user accounts or application-level authentication, so any visitor can use the tool with their own credentials. Run it behind trusted access if you need that. Same-origin mutation checks do not replace authentication. Last.fm browser-authorization migration, durable resumable batches, true full-day analytics, and PWA offline installation remain future work.
 
 ---
 

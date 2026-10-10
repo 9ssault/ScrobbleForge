@@ -16,6 +16,7 @@ import { AutoPlayer } from './components/AutoPlayer';
 import { CatchUpBanner } from './components/CatchUpBanner';
 import { handleSpotifyRedirect } from './spotify';
 import { LiveConsole } from './components/LiveConsole';
+import { loadSessionIdentity } from './session';
 const RecentScrobblesFeed = lazy(() => import('./components/RecentScrobblesFeed').then(module => ({ default: module.RecentScrobblesFeed })));
 import {
   LastFmCredentials,
@@ -88,18 +89,9 @@ export default function App() {
     } catch { setNotice('Queue could not be saved in this browser. Export it before leaving.'); }
   }, [queue]);
 
-  // This browser's own journal identity (the server keeps every visitor isolated).
+  // This browser session's own journal identity (the server keeps every session isolated).
   const [sessionInfo, setSessionInfo] = useState<{ owner: string; legacyRows: number } | null>(null);
-  useEffect(() => {
-    void (async () => {
-      try {
-        const response = await fetch('/api/identity');
-        if (!response.ok) return;
-        const data = await response.json();
-        if (typeof data.owner === 'string') setSessionInfo({ owner: data.owner, legacyRows: Number(data.legacyRows) || 0 });
-      } catch { /* identity display is optional */ }
-    })();
-  }, []);
+  useEffect(() => { void loadSessionIdentity().then(identity => { if (identity) setSessionInfo(identity); }); }, []);
 
   // Spotify playback bridge: the OAuth redirect lands back here and the Client ID stays in
   // this browser, so the server never holds or serves any Spotify configuration.
@@ -728,7 +720,7 @@ export default function App() {
               <p className="text-xs text-zinc-400 leading-relaxed">Only confirmed accepted tracks count as scrobbles. Ignored tracks and dry runs stay separate.</p>
               <div className="border-t border-zinc-800 pt-4 text-xs text-zinc-500 leading-relaxed">Rate limits are recorded across all API calls. During cooldowns, requests are deferred—not silently submitted.</div>
               <p className="text-[11px] text-zinc-500">Your credentials, journal, job and player are private to this browser; the server never stores them for anyone else.</p>
-              {sessionInfo && <p className="text-[11px] text-zinc-500 break-all">Journal id <code className="text-zinc-400">{sessionInfo.owner}</code>{sessionInfo.legacyRows > 0 ? ` · ${sessionInfo.legacyRows} pre-isolation records are not shown here` : ''}</p>}
+              {sessionInfo && <p className="text-[11px] text-zinc-500 break-all">Journal id <code className="text-zinc-400">{sessionInfo.owner}</code> · unique to this browser session{sessionInfo.legacyRows > 0 ? ` · ${sessionInfo.legacyRows} pre-isolation records are not shown here` : ''}</p>}
               <details className="text-xs text-zinc-500"><summary className="cursor-pointer">Developer tools</summary><button onClick={handleSimulateIdle} className="secondary-button mt-3 text-xs">Simulate idle gap (not playback)</button></details>
             </div>
           </div>
